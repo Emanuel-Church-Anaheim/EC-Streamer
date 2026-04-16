@@ -228,6 +228,44 @@
   opacity: .4;
   filter: brightness(.8);
 }
+
+/* Searchable video picker dropdown */
+.video-pick-item:hover,
+.video-pick-item:focus {
+  background: rgba(13, 110, 253, 0.18);
+  color: #fff;
+}
+
+/* Timeline item info popover */
+.tl-popover {
+  min-width: 200px;
+  max-width: 260px;
+  background: #1e2229;
+  border: 1px solid rgba(255,255,255,.15);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.55);
+  font-size: .85rem;
+}
+
+/* Timeline right-click context menu */
+.tl-ctx-menu {
+  min-width: 160px;
+  background: #1e2229;
+  border: 1px solid rgba(255,255,255,.15);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.55);
+  overflow: hidden;
+  font-size: .85rem;
+}
+.tl-ctx-item {
+  padding: 8px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.tl-ctx-item:hover {
+  background: rgba(255,255,255,.08);
+}
 .tl-track.drag-over {
   background: rgba(13, 110, 253, .12);
   outline: 2px dashed rgba(13, 110, 253, .6);

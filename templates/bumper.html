@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=1920" />
+  <title>Coming Up — EC-Streamer</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      background: #060e22;
+      font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+      color: #fff;
+    }
+
+    /* ── animated background ── */
+    body::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 1100px 900px at 10% 50%,  rgba(30,64,175,.22),  transparent),
+        radial-gradient(ellipse 900px  800px at 90% 20%,  rgba(14,165,233,.14), transparent),
+        radial-gradient(ellipse 700px  700px at 85% 80%,  rgba(59,130,246,.12), transparent),
+        linear-gradient(180deg, #060e22 0%, #0c1a3a 50%, #060e22 100%);
+      z-index: 0;
+    }
+
+    /* ── side panels ── */
+    .side {
+      position: absolute;
+      top: 0;
+      width: 295px;
+      height: 1080px;
+      overflow: hidden;
+      z-index: 1;
+    }
+    .side-left  { left:  0; }
+    .side-right { right: 0; }
+
+    /* ── geometric shapes ── */
+    .shape {
+      position: absolute;
+      border-radius: 20px;
+      opacity: 0;
+      animation:
+        shapeReveal 0.9s cubic-bezier(.22,1,.36,1) both,
+        shapeFloat  var(--fd, 7s) ease-in-out var(--fl, 0s) infinite alternate;
+    }
+    .shape.circle { border-radius: 50%; }
+
+    @keyframes shapeReveal {
+      from { opacity: 0;             transform: scale(.65) rotate(var(--r, 0deg)); }
+      to   { opacity: var(--op, .5); transform: scale(1)   rotate(var(--r, 0deg)); }
+    }
+    @keyframes shapeFloat {
+      from { transform: translateY(0px)   rotate(var(--r, 0deg)); }
+      to   { transform: translateY(-24px) rotate(calc(var(--r, 0deg) + 9deg)); }
+    }
+
+    /* ── center layout ── */
+    .center {
+      position: absolute;
+      left: 295px; right: 295px;
+      top: 0; bottom: 0;
+      z-index: 2;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 52px 70px;
+      gap: 0;
+    }
+
+    /* ── heading ── */
+    .heading {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      margin-bottom: 22px;
+      opacity: 0;
+      animation: fadeDown .9s cubic-bezier(.22,1,.36,1) forwards .08s;
+    }
+    .pulse-dot {
+      width: 13px; height: 13px;
+      border-radius: 50%;
+      background: #0ea5e9;
+      box-shadow: 0 0 18px rgba(14,165,233,.7);
+      flex-shrink: 0;
+      animation: pulseDot 1.9s ease-in-out infinite;
+    }
+    .pulse-dot:last-child { animation-delay: .95s; }
+    @keyframes pulseDot {
+      0%,100% { transform: scale(1);   box-shadow: 0 0 18px rgba(14,165,233,.7); }
+      50%      { transform: scale(1.7); box-shadow: 0 0 34px rgba(14,165,233,.95); }
+    }
+    .heading-text {
+      font-size: 32px;
+      font-weight: 300;
+      letter-spacing: 14px;
+      text-transform: uppercase;
+      background: linear-gradient(90deg, #93c5fd, #e0f2fe, #a5f3fc);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    /* ── divider ── */
+    .divider {
+      width: 75%;
+      height: 1.5px;
+      background: linear-gradient(90deg,
+        transparent 0%,
+        rgba(14,165,233,.7) 25%,
+        rgba(59,130,246,.9) 50%,
+        rgba(14,165,233,.7) 75%,
+        transparent 100%);
+      margin-bottom: 36px;
+      opacity: 0;
+      animation: fadeDown .7s ease forwards .25s;
+    }
+
+    /* ── schedule grid ── */
+    .grid {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 24px;
+    }
+    .grid.single { grid-template-columns: 1fr; max-width: 720px; }
+    .grid.pair   { grid-template-columns: repeat(2, 1fr); }
+
+    /* ── card ── */
+    .card {
+      background: rgba(255,255,255,.042);
+      border: 1px solid rgba(59,130,246,.3);
+      border-radius: 22px;
+      padding: 32px 38px 30px;
+      position: relative;
+      overflow: hidden;
+      opacity: 0;
+      animation: cardUp .75s cubic-bezier(.22,1,.36,1) forwards var(--delay, .5s);
+    }
+    /* gradient shimmer top bar */
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; height: 3px;
+      background: linear-gradient(90deg,
+        #1e40af 0%, #0ea5e9 30%, #a5f3fc 50%, #3b82f6 70%, #1e40af 100%);
+      background-size: 200% 100%;
+      animation: shimmer 3.5s linear infinite;
+    }
+    @keyframes shimmer {
+      0%   { background-position: 200%  0; }
+      100% { background-position: -200% 0; }
+    }
+    /* subtle inner glow */
+    .card::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: 22px;
+      background: radial-gradient(ellipse 80% 60% at 50% 0%,
+        rgba(14,165,233,.07), transparent 70%);
+      pointer-events: none;
+    }
+
+    /* time */
+    .card-time {
+      display: flex;
+      align-items: flex-end;
+      line-height: 1;
+      margin-bottom: 16px;
+    }
+    .card-hhmm {
+      font-size: 82px;
+      font-weight: 800;
+      letter-spacing: -4px;
+      background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 55%, #93c5fd 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      font-variant-numeric: tabular-nums;
+    }
+    .card-ampm {
+      font-size: 30px;
+      font-weight: 600;
+      color: #38bdf8;
+      margin-left: 10px;
+      margin-bottom: 13px;
+      letter-spacing: 1px;
+    }
+
+    /* title */
+    .card-title {
+      font-size: 22px;
+      font-weight: 600;
+      color: #f0f9ff;
+      line-height: 1.35;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    /* speaker */
+    .card-speaker {
+      margin-top: 8px;
+      font-size: 17px;
+      font-weight: 400;
+      color: rgba(186,230,253,.55);
+      letter-spacing: .4px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* empty / loading */
+    .placeholder {
+      font-size: 24px;
+      color: rgba(186,230,253,.35);
+      text-align: center;
+      padding: 70px 0;
+    }
+
+    @keyframes fadeDown {
+      from { opacity: 0; transform: translateY(-14px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes cardUp {
+      from { opacity: 0; transform: translateY(30px) scale(.96); }
+      to   { opacity: 1; transform: translateY(0)    scale(1);   }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Left decorative panel ── -->
+<div class="side side-left">
+  <div class="shape" style="
+    width:210px;height:210px;top:55px;left:8px;
+    background:linear-gradient(135deg,rgba(30,64,175,.55),rgba(14,165,233,.25));
+    --r:-17deg;--op:.65;--fd:7.2s;--fl:.1s;animation-delay:.18s,.1s;"></div>
+
+  <div class="shape circle" style="
+    width:126px;height:126px;top:315px;left:124px;
+    background:rgba(14,165,233,.12);
+    border:2px solid rgba(14,165,233,.45);
+    --r:0deg;--op:.72;--fd:5.6s;--fl:.7s;animation-delay:.42s,.7s;"></div>
+
+  <div class="shape" style="
+    width:230px;height:52px;top:510px;left:-35px;
+    background:linear-gradient(90deg,rgba(59,130,246,.28),transparent);
+    border-radius:0 26px 26px 0;
+    --r:0deg;--op:.55;--fd:8.5s;--fl:1.1s;animation-delay:.62s,1.1s;"></div>
+
+  <div class="shape" style="
+    width:98px;height:98px;top:710px;left:68px;
+    background:linear-gradient(45deg,rgba(30,64,175,.4),rgba(14,165,233,.28));
+    --r:27deg;--op:.58;--fd:6.1s;--fl:.4s;animation-delay:.78s,.4s;"></div>
+
+  <div class="shape circle" style="
+    width:165px;height:165px;top:878px;left:-33px;
+    background:rgba(59,130,246,.1);
+    border:1.5px solid rgba(59,130,246,.32);
+    --r:0deg;--op:.42;--fd:9.3s;--fl:1.6s;animation-delay:.98s,1.6s;"></div>
+
+  <div class="shape" style="
+    width:140px;height:140px;top:175px;left:155px;
+    background:linear-gradient(225deg,rgba(168,85,247,.22),rgba(14,165,233,.18));
+    border-radius:50% 20% 50% 20%;
+    --r:12deg;--op:.38;--fd:10s;--fl:2.2s;animation-delay:1.1s,2.2s;"></div>
+</div>
+
+<!-- ── Right decorative panel ── -->
+<div class="side side-right">
+  <div class="shape" style="
+    width:210px;height:210px;top:55px;right:8px;left:auto;
+    background:linear-gradient(225deg,rgba(30,64,175,.55),rgba(14,165,233,.25));
+    --r:17deg;--op:.65;--fd:7.2s;--fl:.3s;animation-delay:.14s,.3s;"></div>
+
+  <div class="shape circle" style="
+    width:126px;height:126px;top:315px;left:44px;
+    background:rgba(14,165,233,.12);
+    border:2px solid rgba(14,165,233,.45);
+    --r:0deg;--op:.72;--fd:5.6s;--fl:1.1s;animation-delay:.38s,1.1s;"></div>
+
+  <div class="shape" style="
+    width:230px;height:52px;top:510px;right:-35px;left:auto;
+    background:linear-gradient(270deg,rgba(59,130,246,.28),transparent);
+    border-radius:26px 0 0 26px;
+    --r:0deg;--op:.55;--fd:8.5s;--fl:1.5s;animation-delay:.58s,1.5s;"></div>
+
+  <div class="shape" style="
+    width:98px;height:98px;top:710px;left:100px;
+    background:linear-gradient(225deg,rgba(30,64,175,.4),rgba(14,165,233,.28));
+    --r:-27deg;--op:.58;--fd:6.1s;--fl:.9s;animation-delay:.74s,.9s;"></div>
+
+  <div class="shape circle" style="
+    width:165px;height:165px;top:878px;right:-33px;left:auto;
+    background:rgba(59,130,246,.1);
+    border:1.5px solid rgba(59,130,246,.32);
+    --r:0deg;--op:.42;--fd:9.3s;--fl:2.1s;animation-delay:.94s,2.1s;"></div>
+
+  <div class="shape" style="
+    width:140px;height:140px;top:175px;left:6px;
+    background:linear-gradient(45deg,rgba(168,85,247,.22),rgba(14,165,233,.18));
+    border-radius:20% 50% 20% 50%;
+    --r:-12deg;--op:.38;--fd:10s;--fl:2.7s;animation-delay:1.05s,2.7s;"></div>
+</div>
+
+<!-- ── Center schedule ── -->
+<div class="center">
+  <div class="heading">
+    <div class="pulse-dot"></div>
+    <div class="heading-text">Coming Up</div>
+    <div class="pulse-dot"></div>
+  </div>
+  <div class="divider"></div>
+  <div class="grid" id="grid">
+    <div class="placeholder">Loading schedule…</div>
+  </div>
+</div>
+
+<script>
+  function to12h(hhmm) {
+    const [h, m] = hhmm.split(':').map(Number);
+    const ampm = h < 12 ? 'AM' : 'PM';
+    return { time: (h % 12 || 12) + ':' + String(m).padStart(2, '0'), ampm };
+  }
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function render(items) {
+    const grid = document.getElementById('grid');
+    if (!items || items.length === 0) {
+      grid.className = 'grid single';
+      grid.innerHTML = '<div class="placeholder">No upcoming schedule.</div>';
+      return;
+    }
+    grid.className = 'grid ' + (items.length === 1 ? 'single' : 'pair');
+    grid.innerHTML = items.map((item, i) => {
+      const { time, ampm } = to12h(item.time);
+      const delay = (0.42 + i * 0.18).toFixed(2);
+      const speaker = item.speaker
+        ? `<div class="card-speaker">${esc(item.speaker)}</div>`
+        : '';
+      return `
+        <div class="card" style="--delay:${delay}s">
+          <div class="card-time">
+            <span class="card-hhmm">${time}</span>
+            <span class="card-ampm">${ampm}</span>
+          </div>
+          <div class="card-title">${esc(item.title || 'TBA')}</div>
+          ${speaker}
+        </div>`;
+    }).join('');
+  }
+
+  fetch('/api/schedule-upcoming')
+    .then(r => r.json())
+    .then(render)
+    .catch(() => {
+      const g = document.getElementById('grid');
+      g.className = 'grid single';
+      g.innerHTML = '<div class="placeholder">Schedule unavailable.</div>';
+    });
+</script>
+</body>
+</html>

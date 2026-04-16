@@ -241,22 +241,72 @@ class StreamManager:
         except Exception:
             return True  # assume audio exists if probe fails
 
-    def _build_video_cmd(self, filepath: str) -> list:
+    def _build_video_cmd(self, filepath: str, schedule_item_id: Optional[int] = None, max_duration: Optional[float] = None) -> list:
         ffmpeg = self.settings.get("ffmpeg_path", "ffmpeg")
         res    = self.settings.get("resolution", "1280x720")
         fps    = self.settings.get("fps", "30")
         w, h   = res.split("x")
 
+        # Optional duration limit (e.g. for scheduled auto_bumper slots)
+        dur_args = ["-t", str(max_duration)] if max_duration else []
+
         # Letterbox / pillar-box scale — preserves aspect ratio
-        vf = (
+        scale_filter = (
             f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
             f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,"
             f"setsar=1,fps=fps={fps}"
         )
 
-        base_cmd = [ffmpeg, "-re", "-i", filepath]
+        overlays = self._get_overlay_graphics(schedule_item_id)
+        has_audio = self._probe_has_audio(filepath)
 
-        if self._probe_has_audio(filepath):
+        base_cmd = [ffmpeg, "-re", *dur_args, "-i", filepath]
+
+        if overlays:
+            # Add each overlay PNG as an additional input
+            for ov in overlays:
+                base_cmd += ["-i", ov["filepath"]]
+            if not has_audio:
+                base_cmd += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
+                anull_idx = len(overlays) + 1
+
+            # Build filter_complex:
+            #   [0:v] -> scale/pad -> [base]
+            #   [N:v] -> scale to output res -> [olN]
+            #   [base][ol1]overlay...[v1]  ->  [v1][ol2]overlay...[v2]  etc.
+            parts = [f"[0:v]{scale_filter}[base]"]
+            prev = "base"
+            for idx, ov in enumerate(overlays):
+                in_idx = idx + 1
+                t1 = ov["trigger_offset"]
+                t2 = t1 + ov["duration"] if ov["duration"] > 0 else None
+                out = f"v{idx + 1}"
+                parts.append(
+                    f"[{in_idx}:v]scale={w}:{h}:flags=lanczos,"
+                    f"format=rgba[ol{in_idx}]"
+                )
+                if t2 is not None:
+                    enable = f":enable='between(t,{t1},{t2})'"
+                elif t1 > 0:
+                    enable = f":enable='gte(t,{t1})'"
+                else:
+                    enable = ""
+                parts.append(f"[{prev}][ol{in_idx}]overlay=0:0{enable}[{out}]")
+                prev = out
+
+            fc = ";".join(parts)
+            audio_map = "0:a" if has_audio else f"{anull_idx}:a"
+            return [
+                *base_cmd,
+                "-filter_complex", fc,
+                "-map", f"[{prev}]", "-map", audio_map,
+                *self._common_encode_args(),
+                self._rtmp_target(),
+            ]
+
+        # No overlays — simple -vf path
+        vf = scale_filter
+        if has_audio:
             return [
                 *base_cmd,
                 "-vf", vf,
@@ -275,11 +325,95 @@ class StreamManager:
                 self._rtmp_target(),
             ]
 
+    def _get_overlay_graphics(self, schedule_item_id: Optional[int]) -> list:
+        """Return enabled PNG overlay records applicable to this video."""
+        from app.database import SessionLocal, LowerThird
+        db = SessionLocal()
+        try:
+            result = []
+            for lt in db.query(LowerThird).filter(LowerThird.enabled == True).all():  # noqa: E712
+                if not lt.filepath or not os.path.exists(lt.filepath):
+                    continue
+                # Global (no schedule_item_id) always applies;
+                # per-slot only applies to its matching slot.
+                if lt.schedule_item_id is None or lt.schedule_item_id == schedule_item_id:
+                    result.append({
+                        "filepath": lt.filepath,
+                        "trigger_offset": lt.trigger_offset or 0,
+                        "duration": lt.duration or 0,
+                    })
+            return result
+        except Exception as exc:
+            self._log(f"Overlay fetch error: {exc}")
+            return []
+        finally:
+            db.close()
+
+    def _get_bumper_for_target(self, target: dict) -> Optional[dict]:
+        """Return a bumper dict to play before target, or None."""
+        if target.get("type") != "video":
+            return None
+        from app.database import SessionLocal, BumperFile, ScheduledItem
+        from app import bumper_renderer
+
+        # 1. Per-item pre-bumper (manual) — always checked first
+        sid = target.get("schedule_item_id")
+        if sid:
+            db = SessionLocal()
+            try:
+                item = db.query(ScheduledItem).filter(ScheduledItem.id == sid).first()
+                if item and item.bumper_pre_id:
+                    b = db.query(BumperFile).filter(
+                        BumperFile.id == item.bumper_pre_id,
+                        BumperFile.enabled == True,  # noqa: E712
+                    ).first()
+                    if b and os.path.exists(b.filepath):
+                        return {"type": "bumper", "title": b.title or b.filename,
+                                "filepath": b.filepath}
+            except Exception as exc:
+                self._log(f"Per-item bumper fetch error: {exc}")
+            finally:
+                db.close()
+
+        # 2. Auto schedule bumper
+        if self.settings.get("auto_bumper_enabled", "false").lower() == "true":
+            auto_path = bumper_renderer.AUTO_BUMPER_PATH
+            if os.path.exists(auto_path):
+                return {"type": "bumper", "title": "Coming Up", "filepath": auto_path}
+
+        # 3. Global manual bumper (round-robin) — only if bumper_enabled=true
+        if self.settings.get("bumper_enabled", "false").lower() != "true":
+            return None
+        if self.settings.get("bumper_between_items", "true").lower() != "true":
+            return None
+        db = SessionLocal()
+        try:
+            bumpers = (
+                db.query(BumperFile)
+                .filter(BumperFile.enabled == True)  # noqa: E712
+                .order_by(BumperFile.id)
+                .all()
+            )
+            # Skip the auto-generated file if it ends up in the DB somehow
+            bumpers = [b for b in bumpers if not b.filename.startswith("_auto_")]
+            if bumpers:
+                b = bumpers[self._bumper_round % len(bumpers)]
+                if os.path.exists(b.filepath):
+                    self._bumper_round += 1
+                    return {"type": "bumper", "title": b.title or b.filename,
+                            "filepath": b.filepath}
+        except Exception as exc:
+            self._log(f"Global bumper fetch error: {exc}")
+        finally:
+            db.close()
+        return None
+
     # ── Internals — schedule logic ────────────────────────────────────────────
 
     def _get_scheduled_item(self) -> Optional[dict]:
         """Return the highest-priority schedule entry that should be playing right now."""
-        from app.database import SessionLocal, ScheduledItem, VideoFile  # local import avoids circular
+        from app.database import SessionLocal, ScheduledItem, VideoFile, BumperFile  # local import avoids circular
+        from app import bumper_renderer
 
         now         = datetime.now()
         now_time    = now.strftime("%H:%M")
@@ -295,18 +429,41 @@ class StreamManager:
                 .all()
             )
             for item in items:
-                video = db.query(VideoFile).filter(VideoFile.id == item.video_id).first()
-                if not video or not os.path.exists(video.filepath):
+                slot_type = getattr(item, "slot_type", None) or "video"
+
+                if slot_type == "video":
+                    video = db.query(VideoFile).filter(VideoFile.id == item.video_id).first() if item.video_id else None
+                    if not video or not os.path.exists(video.filepath):
+                        continue
+                    duration = video.duration or 0
+                    hit_extra = {"video": video}
+
+                elif slot_type == "bumper":
+                    bid = getattr(item, "bumper_id", None)
+                    bumper = db.query(BumperFile).filter(BumperFile.id == bid).first() if bid else None
+                    if not bumper or not os.path.exists(bumper.filepath):
+                        continue
+                    duration = bumper.duration or 0
+                    hit_extra = {"bumper": bumper}
+
+                elif slot_type == "auto_bumper":
+                    if not os.path.exists(bumper_renderer.AUTO_BUMPER_PATH):
+                        continue
+                    duration = getattr(item, "slot_duration", None) or 30
+                    hit_extra = {}
+
+                else:
                     continue
 
-                end_time = _add_minutes_to_hhmm(item.start_time, (video.duration or 0) / 60)
+                end_time = _add_minutes_to_hhmm(item.start_time, duration / 60)
                 if not _time_in_window(now_time, item.start_time, end_time):
                     continue
 
+                match = False
                 if item.recurrence == "once" and item.date == now_date:
-                    return {"item": item, "video": video}
+                    match = True
                 elif item.recurrence == "daily":
-                    return {"item": item, "video": video}
+                    match = True
                 elif item.recurrence == "weekly":
                     days = [
                         int(d.strip())
@@ -314,7 +471,11 @@ class StreamManager:
                         if d.strip().isdigit()
                     ]
                     if now_weekday in days:
-                        return {"item": item, "video": video}
+                        match = True
+
+                if match:
+                    return {"item": item, "slot_type": slot_type, **hit_extra}
+
             return None
         except Exception as exc:
             self._log(f"Schedule check error: {exc}")
@@ -346,17 +507,44 @@ class StreamManager:
         # 2. Scheduled item
         hit = self._get_scheduled_item()
         if hit:
-            video = hit["video"]
-            item  = hit["item"]
-            return {
-                "type": "video",
-                "video_id": video.id,
-                "schedule_item_id": item.id,
-                "title": item.title or video.title or video.filename,
-                "filename": video.filename,
-                "filepath": video.filepath,
-                "override": False,
-            }
+            item      = hit["item"]
+            slot_type = hit.get("slot_type", "video")
+
+            if slot_type == "video":
+                video = hit["video"]
+                return {
+                    "type": "video",
+                    "video_id": video.id,
+                    "schedule_item_id": item.id,
+                    "title": item.title or video.title or video.filename,
+                    "filename": video.filename,
+                    "filepath": video.filepath,
+                    "override": False,
+                }
+
+            elif slot_type == "bumper":
+                bumper = hit["bumper"]
+                return {
+                    "type": "bumper",
+                    "video_id": None,
+                    "schedule_item_id": item.id,
+                    "title": item.title or bumper.title or bumper.filename,
+                    "filepath": bumper.filepath,
+                    "override": False,
+                }
+
+            elif slot_type == "auto_bumper":
+                from app import bumper_renderer
+                slot_dur = getattr(item, "slot_duration", None) or 30
+                return {
+                    "type": "bumper",
+                    "video_id": None,
+                    "schedule_item_id": item.id,
+                    "title": item.title or "Auto Schedule Bumper",
+                    "filepath": bumper_renderer.AUTO_BUMPER_PATH,
+                    "slot_duration": slot_dur,
+                    "override": False,
+                }
 
         # 3. Filler
         return {"type": "filler", "title": "Standby / Filler"}
@@ -368,12 +556,17 @@ class StreamManager:
             return True
         if target["type"] == "video":
             return target.get("video_id") != self.current_item.get("video_id")
+        if target["type"] == "bumper":
+            # Distinguish by schedule_item_id (scheduled bumper) or filepath (pre-roll bumper)
+            return (target.get("schedule_item_id") != self.current_item.get("schedule_item_id")
+                    or target.get("filepath") != self.current_item.get("filepath"))
         return False  # both filler
 
     def _apply_playback(self, target: dict) -> None:
         if target["type"] in ("video", "bumper"):
             sid = target.get("schedule_item_id") if target["type"] == "video" else None
-            cmd = self._build_video_cmd(target["filepath"], sid)
+            max_dur = target.get("slot_duration")  # only set on auto_bumper scheduled slots
+            cmd = self._build_video_cmd(target["filepath"], sid, max_duration=max_dur)
             self._log(f"▶  Playing: {target['title']}")
         else:
             cmd = self._build_filler_cmd()

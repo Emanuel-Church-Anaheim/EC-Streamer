@@ -18,7 +18,7 @@ except ImportError:
 if __name__ == "__main__":
     print("=" * 50)
     print("  EC-Streamer")
-    print("  Web UI → http://localhost:8087")
+    print("  Web UI -> http://localhost:8087")
     print("=" * 50)
     uvicorn.run(
         "app.main:app",

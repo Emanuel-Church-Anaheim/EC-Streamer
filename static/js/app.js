@@ -74,10 +74,11 @@ const App = (() => {
         const tab = a.dataset.tab;
         document.querySelectorAll('.tab-pane').forEach(p => p.classList.add('d-none'));
         document.getElementById('tab-' + tab).classList.remove('d-none');
-        if (tab === 'library')  library.load();
+        if (tab === 'library')  { libraries.load(); library.load(); }
         if (tab === 'schedule') schedule.load();
         if (tab === 'settings') settings.load();
-        if (tab === 'overlays') { bumpers.load(); lowerThirds.load(); }
+        if (tab === 'bumpers')  { autoBumper.load(); bumpers.load(); }
+        if (tab === 'overlays') lowerThirds.load();
       });
     });
   }
@@ -107,6 +108,13 @@ const App = (() => {
   }
   function pad(n) { return String(n).padStart(2, '0'); }
   function fmtTime(t) { return t || '—'; }
+  function fmtLocalTime(hhmm) {
+    if (!hhmm) return '—';
+    const [h, m] = hhmm.split(':').map(Number);
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    const h12  = h === 0 ? 12 : h > 12 ? h - 12 : h;
+    return `${h12}:${String(m).padStart(2, '0')} ${ampm}`;
+  }
 
   // ── Stream controls ───────────────────────────────────────────────────────
   const stream = {
@@ -273,19 +281,142 @@ const App = (() => {
   };
 
   // ── Library ───────────────────────────────────────────────────────────────
+  // ── Folder Libraries ─────────────────────────────────────────────────────
+  const libraries = {
+    _items: [],
+    async load() {
+      try {
+        this._items = await api('GET', '/api/libraries');
+        this.render();
+      } catch (e) { toast('Failed to load libraries: ' + e.message, 'error'); }
+    },
+    render() {
+      const tbody = document.getElementById('libsBody');
+      if (!tbody) return;
+      document.getElementById('libsEmpty').classList.toggle('d-none', this._items.length > 0);
+      document.getElementById('libsTableWrap').classList.toggle('d-none', this._items.length === 0);
+      tbody.innerHTML = this._items.map(lib => `
+        <tr>
+          <td class="text-secondary">${lib.id}</td>
+          <td class="fw-semibold">${escHtml(lib.name)}</td>
+          <td class="small font-monospace text-secondary">${escHtml(lib.folder_path)}</td>
+          <td class="text-center">
+            <div class="form-check form-switch mb-0 d-flex justify-content-center">
+              <input class="form-check-input" type="checkbox" ${lib.auto_scan ? 'checked' : ''}
+                onchange="App.libraries.setAutoScan(${lib.id}, this.checked)" />
+            </div>
+          </td>
+          <td class="text-end">
+            <button class="btn btn-sm btn-outline-success me-1" title="Scan now"
+              onclick="App.libraries.scan(${lib.id}, '${escAttr(lib.name)}')">
+              <i class="bi bi-arrow-repeat"></i> Scan</button>
+            <button class="btn btn-sm btn-outline-danger" title="Remove library"
+              onclick="App.libraries.confirmDelete(${lib.id}, '${escAttr(lib.name)}')">
+              <i class="bi bi-trash"></i></button>
+          </td>
+        </tr>`).join('');
+    },
+    openAdd() {
+      document.getElementById('libId').value        = '';
+      document.getElementById('libPath').value      = '';
+      document.getElementById('libName').value      = '';
+      document.getElementById('libAutoScan').checked = true;
+      document.getElementById('libScanResult').classList.add('d-none');
+      document.getElementById('libPath').disabled   = false;
+      document.getElementById('libModalTitle').innerHTML = '<i class="bi bi-folder-plus me-2"></i>Add Folder Library';
+      document.getElementById('btnLibSave').innerHTML = '<i class="bi bi-folder-check me-1"></i>Add &amp; Scan';
+      _modal('libModal').show();
+    },
+    async save() {
+      const path = document.getElementById('libPath').value.trim();
+      const name = document.getElementById('libName').value.trim();
+      const auto = document.getElementById('libAutoScan').checked;
+      if (!path) { toast('Enter a folder path', 'error'); return; }
+      const btn = document.getElementById('btnLibSave');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Scanning…';
+      try {
+        const r = await api('POST', '/api/libraries', { folder_path: path, name, auto_scan: auto });
+        const msg = document.getElementById('libScanMsg');
+        msg.textContent = `Done — ${r.added} video(s) added, ${r.skipped} already known.`;
+        document.getElementById('libScanResult').classList.remove('d-none');
+        document.getElementById('libPath').disabled = true;
+        btn.innerHTML = '<i class="bi bi-check-lg me-1"></i>Close';
+        btn.onclick = () => {
+          _modal('libModal').hide();
+          btn.onclick = () => App.libraries.save();
+        };
+        this.load();
+        library.load();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        btn.disabled = false;
+        if (btn.innerHTML.includes('spinner')) {
+          btn.innerHTML = '<i class="bi bi-folder-check me-1"></i>Add &amp; Scan';
+        }
+      }
+    },
+    async scan(id, name) {
+      try {
+        const r = await api('POST', `/api/libraries/${id}/scan`);
+        toast(`"${name}" scanned — ${r.added} added, ${r.skipped} already known`);
+        library.load();
+      } catch (e) { toast(e.message, 'error'); }
+    },
+    async setAutoScan(id, val) {
+      try { await api('PUT', `/api/libraries/${id}`, { auto_scan: val }); }
+      catch (e) { toast(e.message, 'error'); this.load(); }
+    },
+    confirmDelete(id, name) {
+      document.getElementById('deleteModalBody').innerHTML =
+        `<p>Remove library folder "<strong>${escHtml(name)}</strong>"?</p>` +
+        `<p class="mb-0 text-secondary small">Videos already imported will stay in the library unless you check the box below.</p>` +
+        `<div class="form-check mt-2"><input class="form-check-input" type="checkbox" id="libDeleteVideos" />` +
+        `<label class="form-check-label" for="libDeleteVideos">Also remove imported videos from this folder</label></div>`;
+      const btn = document.getElementById('btnConfirmDelete');
+      btn.onclick = async () => {
+        const removeVids = document.getElementById('libDeleteVideos')?.checked || false;
+        try {
+          await api('DELETE', `/api/libraries/${id}?remove_videos=${removeVids}`);
+          toast('Library removed');
+          _modal('deleteModal').hide();
+          this.load();
+          library.load();
+        } catch (e) { toast(e.message, 'error'); }
+      };
+      _modal('deleteModal').show();
+    },
+  };
+
   const library = {
     _file: null,
+    _filter: '',
     async load() {
       try {
         _videos = await api('GET', '/api/videos');
         this.render();
       } catch (e) { toast('Failed to load library: ' + e.message, 'error'); }
     },
+    filter(q) {
+      this._filter = q.toLowerCase();
+      this.render();
+    },
     render() {
       const tbody = document.getElementById('libraryBody');
+      const q     = this._filter;
+      const shown = q
+        ? _videos.filter(v =>
+            v.title.toLowerCase().includes(q) ||
+            v.filename.toLowerCase().includes(q))
+        : _videos;
       document.getElementById('libraryEmpty').classList.toggle('d-none', _videos.length > 0);
       document.getElementById('libraryTable').classList.toggle('d-none', _videos.length === 0);
-      tbody.innerHTML = _videos.map(v => `
+      tbody.innerHTML = shown.map(v => {
+        const src = v.library_id
+          ? `<span class="badge bg-warning text-dark" title="From folder library">Folder</span>`
+          : `<span class="badge bg-secondary">Uploaded</span>`;
+        return `
         <tr>
           <td class="text-secondary">${v.id}</td>
           <td>
@@ -295,6 +426,7 @@ const App = (() => {
           <td class="text-secondary small font-monospace">${escHtml(v.filename)}</td>
           <td>${fmtDuration(v.duration)}</td>
           <td>${fmtSize(v.size)}</td>
+          <td>${src}</td>
           <td class="text-end">
             <button class="btn btn-sm btn-success me-1" title="Play Now"
               onclick="App.library.playNow(${v.id})">
@@ -306,7 +438,8 @@ const App = (() => {
               onclick="App.library.confirmDelete(${v.id}, '${escAttr(v.title)}')">
               <i class="bi bi-trash"></i></button>
           </td>
-        </tr>`).join('');
+        </tr>`;
+      }).join('');
     },
     async playNow(id) {
       try {
@@ -435,14 +568,26 @@ const App = (() => {
         }
         const badge = item.recurrence === 'once'   ? 'bg-secondary' :
                       item.recurrence === 'daily'  ? 'bg-info text-dark' : 'bg-primary';
+
+        const slotType = item.slot_type || 'video';
+        let contentCell = '';
+        if (slotType === 'bumper') {
+          contentCell = `<span class="badge bg-success me-1"><i class="bi bi-collection-play-fill"></i> Bumper</span> ${escHtml(item.video_title)}`;
+        } else if (slotType === 'auto_bumper') {
+          contentCell = `<span class="badge bg-success me-1"><i class="bi bi-calendar-range"></i> Auto Bumper</span>`;
+        } else {
+          contentCell = escHtml(item.video_title);
+        }
+
+        const isVideo = slotType === 'video';
         return `
           <tr class="${item.enabled ? '' : 'opacity-50'}">
-            <td class="fw-bold">${item.start_time}</td>
+            <td class="fw-bold">${fmtLocalTime(item.start_time)}</td>
             <td>
               <span class="badge ${badge} me-1">${item.recurrence}</span>
               ${escHtml(when)}
             </td>
-            <td>${escHtml(item.video_title)}</td>
+            <td>${contentCell}</td>
             <td>${fmtDuration(item.video_duration)}</td>
             <td>${item.priority}</td>
             <td>
@@ -452,7 +597,8 @@ const App = (() => {
               </div>
             </td>
             <td class="text-end">
-              <button class="btn btn-sm btn-outline-secondary me-1" onclick="App.schedule.openEdit(${item.id})">
+              <button class="btn btn-sm btn-outline-secondary me-1"
+                onclick="${isVideo ? `App.schedule.openEdit(${item.id})` : `App.schedule.openEditBumperSlot(${item.id})`}">
                 <i class="bi bi-pencil"></i></button>
               <button class="btn btn-sm btn-outline-danger"
                 onclick="App.schedule.confirmDelete(${item.id}, '${escAttr(item.video_title)}')">
@@ -462,17 +608,73 @@ const App = (() => {
       }).join('');
     },
     _populateVideoSelect() {
-      const sel = document.getElementById('schedVideo');
-      sel.innerHTML = _videos.length
-        ? _videos.map(v => `<option value="${v.id}">${escHtml(v.title)}</option>`).join('')
-        : '<option disabled>No videos in library</option>';
+      // No-op: searchable picker is built on demand in filterVideoSearch
+    },
+    _renderVideoDropdown(filter) {
+      const drop = document.getElementById('schedVideoDropdown');
+      if (!drop) return;
+      const q = (filter || '').toLowerCase();
+      const matches = q
+        ? _videos.filter(v => v.title.toLowerCase().includes(q)).slice(0, 80)
+        : _videos.slice(0, 80);
+      if (!matches.length) {
+        drop.innerHTML = '<div class="px-3 py-2 text-secondary small">No videos match</div>';
+        return;
+      }
+      drop.innerHTML = matches.map(v =>
+        `<div class="px-3 py-2 small video-pick-item" style="cursor:pointer"
+          data-id="${v.id}" data-title="${escHtml(v.title)}"
+          onmousedown="App.schedule.selectVideo(${v.id}, '${escAttr(v.title)}')">${escHtml(v.title)}</div>`
+      ).join('');
+    },
+    showVideoDropdown() {
+      const drop = document.getElementById('schedVideoDropdown');
+      if (!drop) return;
+      const q = document.getElementById('schedVideoSearch')?.value || '';
+      this._renderVideoDropdown(q);
+      drop.classList.remove('d-none');
+    },
+    hideVideoDropdown() {
+      // Delay so mousedown on an item fires first
+      setTimeout(() => {
+        const drop = document.getElementById('schedVideoDropdown');
+        if (drop) drop.classList.add('d-none');
+      }, 180);
+    },
+    filterVideoSearch() {
+      const q = document.getElementById('schedVideoSearch')?.value || '';
+      this._renderVideoDropdown(q);
+      const drop = document.getElementById('schedVideoDropdown');
+      if (drop) drop.classList.remove('d-none');
+      // Clear selection if user edits the text
+      document.getElementById('schedVideo').value = '';
+      document.getElementById('schedVideoSelected').textContent = '';
+    },
+    selectVideo(id, title) {
+      document.getElementById('schedVideo').value = id;
+      document.getElementById('schedVideoSearch').value = title;
+      document.getElementById('schedVideoSelected').textContent = '\u2713 Selected';
+      const drop = document.getElementById('schedVideoDropdown');
+      if (drop) drop.classList.add('d-none');
+    },
+    _setVideoPickerValue(videoId) {
+      const v = _videos.find(x => x.id === videoId);
+      if (v) {
+        document.getElementById('schedVideo').value = v.id;
+        document.getElementById('schedVideoSearch').value = v.title;
+        document.getElementById('schedVideoSelected').textContent = '\u2713 Selected';
+      } else {
+        document.getElementById('schedVideo').value = '';
+        document.getElementById('schedVideoSearch').value = '';
+        document.getElementById('schedVideoSelected').textContent = '';
+      }
     },
     async _populateBumperSelects() {
       try {
-        const bList = await api('GET', '/api/bumpers');
+        _bumpersList = await api('GET', '/api/bumpers');
         const none1 = '<option value="">None (use global if enabled)</option>';
         const none2 = '<option value="">None</option>';
-        const opts  = bList.map(b =>
+        const opts  = _bumpersList.map(b =>
           `<option value="${b.id}">${escHtml(b.title)} (${fmtDuration(b.duration)})</option>`
         ).join('');
         document.getElementById('schedBumperPre').innerHTML  = none1 + opts;
@@ -485,7 +687,9 @@ const App = (() => {
       document.getElementById('schedItemId').value = '';
       document.getElementById('scheduleModalTitle').innerHTML =
         '<i class="bi bi-calendar-plus me-2"></i>Add Schedule Item';
-      this._populateVideoSelect();
+      document.getElementById('schedVideoSearch').value = '';
+      document.getElementById('schedVideo').value = '';
+      document.getElementById('schedVideoSelected').textContent = '';
       document.getElementById('schedTime').value      = '12:00';
       document.getElementById('schedRecurrence').value = 'once';
       document.getElementById('schedDate').value      = new Date().toISOString().split('T')[0];
@@ -505,9 +709,9 @@ const App = (() => {
       document.getElementById('schedItemId').value = id;
       document.getElementById('scheduleModalTitle').innerHTML =
         '<i class="bi bi-calendar-event me-2"></i>Edit Schedule Item';
-      if (!_videos.length) api('GET', '/api/videos').then(v => { _videos = v; this._populateVideoSelect(); });
-      else this._populateVideoSelect();
-      document.getElementById('schedVideo').value       = item.video_id;
+      const afterVideos = () => this._setVideoPickerValue(item.video_id);
+      if (!_videos.length) api('GET', '/api/videos').then(v => { _videos = v; afterVideos(); });
+      else afterVideos();
       document.getElementById('schedTime').value        = item.start_time;
       document.getElementById('schedRecurrence').value  = item.recurrence;
       document.getElementById('schedDate').value        = item.date || '';
@@ -536,21 +740,54 @@ const App = (() => {
       const days     = [...document.querySelectorAll('.sched-day:checked')].map(c => c.value).join(',');
       const bPre     = parseInt(document.getElementById('schedBumperPre').value)  || null;
       const bPost    = parseInt(document.getElementById('schedBumperPost').value) || null;
+      const startTime = document.getElementById('schedTime').value;
       const payload  = {
         video_id:     parseInt(document.getElementById('schedVideo').value),
-        start_time:   document.getElementById('schedTime').value,
+        start_time:   startTime,
         recurrence:   rec,
         date:         rec === 'once' ? document.getElementById('schedDate').value : null,
         days_of_week: rec === 'weekly' ? days : null,
         title:        document.getElementById('schedTitle').value.trim() || null,
         priority:     parseInt(document.getElementById('schedPriority').value) || 0,
         enabled:      document.getElementById('schedEnabled').checked,
-        bumper_pre_id:  bPre,
-        bumper_post_id: bPost,
+        bumper_pre_id:  null,   // no longer stored on the video slot
+        bumper_post_id: null,
       };
       try {
         if (id) await api('PUT',  `/api/schedule/${id}`, payload);
         else    await api('POST', '/api/schedule', payload);
+
+        // Auto-insert pre/post bumper as separate bumper slots
+        if (!id) {  // only on create (not edit) to avoid duplicating
+          const base = { recurrence: rec, date: payload.date,
+                         days_of_week: payload.days_of_week,
+                         priority: payload.priority + 1,
+                         enabled: payload.enabled,
+                         slot_type: 'bumper', video_id: null };
+          // Helper: add minutes to HH:MM string
+          const addMins = (hhmm, delta) => {
+            const [h, m] = hhmm.split(':').map(Number);
+            const total  = Math.max(0, Math.min(1439, h * 60 + m + delta));
+            return pad(Math.floor(total / 60)) + ':' + pad(total % 60);
+          };
+          if (bPre) {
+            const bDur = Math.ceil((_bumpersList.find(b => b.id === bPre)?.duration || 30) / 60);
+            await api('POST', '/api/schedule', {
+              ...base, bumper_id: bPre,
+              start_time: addMins(startTime, -bDur),
+              title: null,
+            });
+          }
+          if (bPost) {
+            const vidDur  = Math.ceil((_videos.find(v => v.id === payload.video_id)?.duration || 300) / 60);
+            await api('POST', '/api/schedule', {
+              ...base, bumper_id: bPost,
+              start_time: addMins(startTime, vidDur),
+              title: null,
+            });
+          }
+        }
+
         toast('Schedule saved');
         _modal('scheduleModal').hide();
         this.load();
@@ -571,6 +808,93 @@ const App = (() => {
         } catch (e) { toast(e.message, 'error'); }
       };
       _modal('deleteModal').show();
+    },
+
+    // ── Bumper slot methods ─────────────────────────────────────────────────
+    async openAddBumper() {
+      // Populate bumper select
+      let bList = [];
+      try { bList = await api('GET', '/api/bumpers'); } catch {}
+      const sel = document.getElementById('bSlotBumperId');
+      sel.innerHTML = bList.length
+        ? bList.filter(b => b.enabled).map(b =>
+            `<option value="${b.id}">${escHtml(b.title || b.filename)} (${fmtDuration(b.duration)})</option>`
+          ).join('')
+        : '<option disabled value="">No bumpers uploaded yet</option>';
+
+      document.getElementById('bSlotId').value = '';
+      document.getElementById('bSlotTypeManual').checked = true;
+      document.getElementById('bSlotTime').value = '12:00';
+      document.getElementById('bSlotRecurrence').value = 'once';
+      document.getElementById('bSlotDate').value = new Date().toISOString().split('T')[0];
+      document.getElementById('bSlotDuration').value = '30';
+      document.getElementById('bSlotTitle').value = '';
+      document.getElementById('bSlotPriority').value = '0';
+      document.getElementById('bSlotEnabled').checked = true;
+      document.querySelectorAll('.bslot-day').forEach(c => c.checked = false);
+      this.onBSlotTypeChange();
+      this.onBSlotRecurrenceChange();
+      _modal('bumperSlotModal').show();
+    },
+    openEditBumperSlot(id) {
+      const item = this._items.find(x => x.id === id);
+      if (!item) return;
+      this.openAddBumper().then(() => {
+        document.getElementById('bSlotId').value = id;
+        const isAuto = item.slot_type === 'auto_bumper';
+        document.getElementById(isAuto ? 'bSlotTypeAuto' : 'bSlotTypeManual').checked = true;
+        document.getElementById('bSlotTime').value = item.start_time;
+        document.getElementById('bSlotRecurrence').value = item.recurrence;
+        document.getElementById('bSlotDate').value = item.date || '';
+        const days = (item.days_of_week || '').split(',').map(Number);
+        document.querySelectorAll('.bslot-day').forEach(c => c.checked = days.includes(parseInt(c.value)));
+        document.getElementById('bSlotTitle').value = item.title || '';
+        document.getElementById('bSlotPriority').value = item.priority || 0;
+        document.getElementById('bSlotEnabled').checked = item.enabled;
+        if (item.slot_duration) document.getElementById('bSlotDuration').value = item.slot_duration;
+        if (!isAuto && item.bumper_id) document.getElementById('bSlotBumperId').value = item.bumper_id;
+        this.onBSlotTypeChange();
+        this.onBSlotRecurrenceChange();
+      });
+    },
+    onBSlotTypeChange() {
+      const isAuto = document.getElementById('bSlotTypeAuto').checked;
+      document.getElementById('bSlotBumperGroup').classList.toggle('d-none', isAuto);
+      document.getElementById('bSlotDurationGroup').classList.toggle('d-none', !isAuto);
+    },
+    onBSlotRecurrenceChange() {
+      const rec = document.getElementById('bSlotRecurrence').value;
+      document.getElementById('bSlotDateGroup').style.display = rec === 'once' ? '' : 'none';
+      document.getElementById('bSlotDaysGroup').classList.toggle('d-none', rec !== 'weekly');
+    },
+    async saveBumperSlot() {
+      const id      = document.getElementById('bSlotId').value;
+      const isAuto  = document.getElementById('bSlotTypeAuto').checked;
+      const slotType = isAuto ? 'auto_bumper' : 'bumper';
+      const rec     = document.getElementById('bSlotRecurrence').value;
+      const days    = [...document.querySelectorAll('.bslot-day:checked')].map(c => c.value).join(',');
+      const bId     = !isAuto ? (parseInt(document.getElementById('bSlotBumperId').value) || null) : null;
+      const dur     = isAuto  ? (parseFloat(document.getElementById('bSlotDuration').value) || 30) : null;
+      const payload = {
+        slot_type:    slotType,
+        bumper_id:    bId,
+        slot_duration: dur,
+        video_id:     null,
+        start_time:   document.getElementById('bSlotTime').value,
+        recurrence:   rec,
+        date:         rec === 'once' ? document.getElementById('bSlotDate').value : null,
+        days_of_week: rec === 'weekly' ? days : null,
+        title:        document.getElementById('bSlotTitle').value.trim() || null,
+        priority:     parseInt(document.getElementById('bSlotPriority').value) || 0,
+        enabled:      document.getElementById('bSlotEnabled').checked,
+      };
+      try {
+        if (id) await api('PUT', `/api/schedule/${id}`, payload);
+        else    await api('POST', '/api/schedule', payload);
+        toast('Bumper slot saved');
+        _modal('bumperSlotModal').hide();
+        this.load();
+      } catch (e) { toast(e.message, 'error'); }
     },
 
     setView(v) {
@@ -635,21 +959,30 @@ const App = (() => {
 
           const [hh, mm] = item.start_time.split(':').map(Number);
           const startMin = hh * 60 + mm;
+          const slotType = item.slot_type || 'video';
           const durMin   = Math.max(5, Math.ceil((item.video_duration || 300) / 60));
           const width    = Math.min(durMin, 1440 - startMin);
           if (width <= 0) continue;
 
-          const col   = COLORS[item.video_id % COLORS.length];
+          let col, tlClass, editFn;
+          if (slotType === 'bumper') {
+            col = '#22c55e'; tlClass = ' tl-slot-bumper'; editFn = `App.schedule.openEditBumperSlot(${item.id})`;
+          } else if (slotType === 'auto_bumper') {
+            col = '#10b981'; tlClass = ' tl-slot-auto-bumper'; editFn = `App.schedule.openEditBumperSlot(${item.id})`;
+          } else {
+            col = TL_VIDEO_COLOR; tlClass = ''; editFn = `App.schedule.openEdit(${item.id})`;
+          }
           const title = escHtml(item.title || item.video_title || '?');
           const hasBumper = item.bumper_pre_id ? ' tl-has-bumper' : '';
           itemsHtml += `
-            <div class="tl-item${hasBumper}"
+            <div class="tl-item${hasBumper}${tlClass}"
               draggable="true"
               style="left:${pct(startMin)};width:${pct(width)};background:${col}"
-              title="${title} @ ${item.start_time} (${fmtDuration(item.video_duration)})"
+              title="${title} @ ${fmtLocalTime(item.start_time)} (${fmtDuration(item.video_duration)})"
               ondragstart="App.schedule.tlDragStart(event,${item.id},${startMin},${rowDow})"
               ondragend="App.schedule.tlDragEnd(event)"
-              onclick="App.schedule.openEdit(${item.id})">
+              onclick="App.schedule.tlItemClick(event,${item.id})"
+              oncontextmenu="App.schedule.tlItemRightClick(event,${item.id})">
               <span class="tl-item-label">${title}</span>
             </div>`;
         }
@@ -681,6 +1014,78 @@ const App = (() => {
     tlDragEnd(e) {
       e.currentTarget.classList.remove('is-dragging');
       _tlTooltip().style.display = 'none';
+    },
+
+    // click on item → show info popover; right-click → context menu
+    tlItemClick(e, id) {
+      e.stopPropagation();
+      const item = this._items.find(x => x.id === id);
+      if (!item) return;
+      // Remove any existing popover/menu
+      document.querySelector('.tl-popover')?.remove();
+      const slotType = item.slot_type || 'video';
+      const editFn = slotType === 'video'
+        ? `App.schedule.openEdit(${id})`
+        : `App.schedule.openEditBumperSlot(${id})`;
+      const typeLabel = slotType === 'auto_bumper' ? 'Auto Bumper'
+                      : slotType === 'bumper'      ? 'Bumper'
+                      : 'Video';
+      const pop = document.createElement('div');
+      pop.className = 'tl-popover';
+      pop.innerHTML = `
+        <div class="fw-semibold mb-1">${escHtml(item.title || item.video_title || '?')}</div>
+        <div class="text-secondary small">${typeLabel} &mdash; ${fmtLocalTime(item.start_time)}</div>
+        <div class="text-secondary small">${fmtDuration(item.video_duration)}</div>
+        <div class="d-flex gap-2 mt-2">
+          <button class="btn btn-sm btn-outline-primary" onclick="${editFn};document.querySelector('.tl-popover')?.remove()">
+            <i class="bi bi-pencil me-1"></i>Edit</button>
+          <button class="btn btn-sm btn-outline-danger" onclick="App.schedule.tlDelete(${id});document.querySelector('.tl-popover')?.remove()">
+            <i class="bi bi-trash me-1"></i>Delete</button>
+        </div>`;
+      // Position near the clicked element
+      const rect = e.currentTarget.getBoundingClientRect();
+      pop.style.cssText = `position:fixed;z-index:1080;left:${Math.min(rect.left, window.innerWidth-220)}px;top:${rect.bottom+4}px`;
+      document.body.appendChild(pop);
+      const dismiss = ev => { if (!pop.contains(ev.target)) { pop.remove(); document.removeEventListener('click', dismiss); } };
+      setTimeout(() => document.addEventListener('click', dismiss), 10);
+    },
+    tlItemRightClick(e, id) {
+      e.preventDefault();
+      e.stopPropagation();
+      document.querySelector('.tl-popover')?.remove();
+      document.querySelector('.tl-ctx-menu')?.remove();
+      const item = this._items.find(x => x.id === id);
+      if (!item) return;
+      const menu = document.createElement('div');
+      menu.className = 'tl-ctx-menu';
+      const slotType = item.slot_type || 'video';
+      const editFn = slotType === 'video'
+        ? `App.schedule.openEdit(${id})`
+        : `App.schedule.openEditBumperSlot(${id})`;
+      menu.innerHTML = `
+        <div class="tl-ctx-item" onclick="${editFn};document.querySelector('.tl-ctx-menu')?.remove()">
+          <i class="bi bi-pencil me-2"></i>Edit</div>
+        <div class="tl-ctx-item text-danger" onclick="App.schedule.tlDelete(${id});document.querySelector('.tl-ctx-menu')?.remove()">
+          <i class="bi bi-trash me-2"></i>Delete</div>`;
+      menu.style.cssText = `position:fixed;z-index:1080;left:${e.clientX}px;top:${e.clientY}px`;
+      document.body.appendChild(menu);
+      const dismiss = () => { menu.remove(); document.removeEventListener('click', dismiss); };
+      setTimeout(() => document.addEventListener('click', dismiss), 10);
+    },
+    tlDelete(id) {
+      const item = this._items.find(x => x.id === id);
+      if (!item) return;
+      const name = item.title || item.video_title || 'this slot';
+      document.getElementById('deleteModalBody').textContent = `Remove schedule for "${name}"?`;
+      document.getElementById('btnConfirmDelete').onclick = async () => {
+        try {
+          await api('DELETE', `/api/schedule/${id}`);
+          toast('Removed');
+          _modal('deleteModal').hide();
+          this.load();
+        } catch (e2) { toast(e2.message, 'error'); }
+      };
+      _modal('deleteModal').show();
     },
     tlDragOver(e) {
       e.preventDefault();
@@ -864,7 +1269,7 @@ const App = (() => {
       try {
         this._items = await api('GET', '/api/lower-thirds');
         this.render();
-      } catch (e) { toast('Failed to load lower thirds: ' + e.message, 'error'); }
+      } catch (e) { toast('Failed to load overlays: ' + e.message, 'error'); }
     },
     render() {
       const tbody = document.getElementById('ltBody');
@@ -872,17 +1277,21 @@ const App = (() => {
       document.getElementById('ltEmpty').classList.toggle('d-none', this._items.length > 0);
       document.getElementById('ltTable').classList.toggle('d-none', this._items.length === 0);
       tbody.innerHTML = this._items.map(lt => {
-        const timing = `${lt.trigger_offset}s – ${lt.trigger_offset + lt.duration}s`;
-        const scope  = lt.schedule_item_id ? `Slot #${lt.schedule_item_id}` : 'Global';
+        const timing = lt.duration > 0
+          ? `${lt.trigger_offset}s – ${lt.trigger_offset + lt.duration}s`
+          : (lt.trigger_offset > 0 ? `from ${lt.trigger_offset}s` : 'Entire video');
+        const scope = lt.schedule_item_id ? `Slot #${lt.schedule_item_id}` : 'Global';
         return `
           <tr class="${lt.enabled ? '' : 'opacity-50'}">
             <td class="text-secondary">${lt.id}</td>
-            <td class="fw-semibold">${escHtml(lt.label || '—')}</td>
             <td>
-              <div>${escHtml(lt.line1 || '')}</div>
-              ${lt.line2 ? `<div class="text-secondary small">${escHtml(lt.line2)}</div>` : ''}
+              <img src="/api/lower-thirds/${lt.id}/image" alt="${escHtml(lt.label||'')}"
+                   class="img-thumbnail" style="height:40px;width:auto;cursor:pointer;"
+                   onclick="window.open('/api/lower-thirds/${lt.id}/image','_blank')" />
             </td>
-            <td class="small text-secondary">${lt.position || ''}</td>
+            <td class="fw-semibold">${escHtml(lt.label || '—')}<br>
+              <span class="text-secondary small font-monospace">${escHtml(lt.filename || '')}</span>
+            </td>
             <td class="small font-monospace text-secondary">${timing}</td>
             <td><span class="badge ${lt.schedule_item_id ? 'bg-warning text-dark' : 'bg-secondary'}">${scope}</span></td>
             <td class="text-center">
@@ -909,25 +1318,23 @@ const App = (() => {
         items.forEach(item => {
           const opt = document.createElement('option');
           opt.value = item.id;
-          opt.textContent = `${item.start_time} – ${item.video_title} (${item.recurrence})`;
+          opt.textContent = `${fmtLocalTime(item.start_time)} – ${item.video_title} (${item.recurrence})`;
           sel.appendChild(opt);
         });
       } catch {}
     },
     async openAdd() {
       document.getElementById('ltId').value        = '';
-      document.getElementById('ltModalTitle').innerHTML = '<i class="bi bi-fonts me-2"></i>Add Lower Third';
+      document.getElementById('ltModalTitle').innerHTML = '<i class="bi bi-image me-2"></i>Upload Overlay Graphic';
       document.getElementById('ltLabel').value     = '';
-      document.getElementById('ltLine1').value     = '';
-      document.getElementById('ltLine2').value     = '';
-      document.getElementById('ltPosition').value  = 'bottom-left';
-      document.getElementById('ltFontSize').value  = '32';
-      document.getElementById('ltTextColor').value = '#ffffff';
-      document.getElementById('ltBgColor').value   = '#000000';
-      document.getElementById('ltBgOpacity').value = '0.6';
-      document.getElementById('ltTrigger').value   = '5';
-      document.getElementById('ltDuration').value  = '10';
+      document.getElementById('ltTrigger').value   = '0';
+      document.getElementById('ltDuration').value  = '0';
       document.getElementById('ltEnabled').checked = true;
+      document.getElementById('ltFile').value      = '';
+      // show file picker, hide preview
+      document.getElementById('ltFileRow').classList.remove('d-none');
+      document.getElementById('ltPreviewRow').classList.add('d-none');
+      document.getElementById('btnLtSave').innerHTML = '<i class="bi bi-upload me-1"></i>Upload &amp; Save';
       await this._populateScheduleItems();
       _modal('ltModal').show();
     },
@@ -935,41 +1342,49 @@ const App = (() => {
       const lt = this._items.find(x => x.id === id);
       if (!lt) return;
       document.getElementById('ltId').value        = id;
-      document.getElementById('ltModalTitle').innerHTML = '<i class="bi bi-pencil me-2"></i>Edit Lower Third';
+      document.getElementById('ltModalTitle').innerHTML = '<i class="bi bi-pencil me-2"></i>Edit Overlay';
       document.getElementById('ltLabel').value     = lt.label || '';
-      document.getElementById('ltLine1').value     = lt.line1 || '';
-      document.getElementById('ltLine2').value     = lt.line2 || '';
-      document.getElementById('ltPosition').value  = lt.position || 'bottom-left';
-      document.getElementById('ltFontSize').value  = lt.font_size || 32;
-      document.getElementById('ltTextColor').value = '#' + (lt.text_color || 'ffffff');
-      document.getElementById('ltBgColor').value   = '#' + (lt.bg_color || '000000');
-      document.getElementById('ltBgOpacity').value = lt.bg_opacity ?? 0.6;
-      document.getElementById('ltTrigger').value   = lt.trigger_offset ?? 5;
-      document.getElementById('ltDuration').value  = lt.duration ?? 10;
+      document.getElementById('ltTrigger').value   = lt.trigger_offset ?? 0;
+      document.getElementById('ltDuration').value  = lt.duration ?? 0;
       document.getElementById('ltEnabled').checked = lt.enabled;
+      // hide file picker, show preview
+      document.getElementById('ltFileRow').classList.add('d-none');
+      document.getElementById('ltPreviewRow').classList.remove('d-none');
+      document.getElementById('ltPreviewImg').src  = `/api/lower-thirds/${lt.id}/image`;
+      document.getElementById('ltCurrentFilename').textContent = lt.filename || '';
+      document.getElementById('btnLtSave').innerHTML = '<i class="bi bi-check-lg me-1"></i>Save';
       await this._populateScheduleItems();
       document.getElementById('ltScheduleItem').value = lt.schedule_item_id || '';
       _modal('ltModal').show();
     },
     async save() {
-      const id = document.getElementById('ltId').value;
-      const payload = {
-        label:           document.getElementById('ltLabel').value.trim(),
-        line1:           document.getElementById('ltLine1').value.trim(),
-        line2:           document.getElementById('ltLine2').value.trim(),
-        position:        document.getElementById('ltPosition').value,
-        font_size:       parseInt(document.getElementById('ltFontSize').value)    || 32,
-        text_color:      document.getElementById('ltTextColor').value.replace('#', ''),
-        bg_color:        document.getElementById('ltBgColor').value.replace('#', ''),
-        bg_opacity:      parseFloat(document.getElementById('ltBgOpacity').value) || 0.6,
-        trigger_offset:  parseInt(document.getElementById('ltTrigger').value)     || 0,
-        duration:        parseInt(document.getElementById('ltDuration').value)    || 10,
-        schedule_item_id: parseInt(document.getElementById('ltScheduleItem').value) || null,
-        enabled:         document.getElementById('ltEnabled').checked,
-      };
+      const id      = document.getElementById('ltId').value;
+      const label   = document.getElementById('ltLabel').value.trim();
+      const trigger = parseInt(document.getElementById('ltTrigger').value) || 0;
+      const dur     = parseInt(document.getElementById('ltDuration').value) || 0;
+      const sid     = parseInt(document.getElementById('ltScheduleItem').value) || null;
+      const enabled = document.getElementById('ltEnabled').checked;
+
       try {
-        if (id) await api('PUT',  `/api/lower-thirds/${id}`, payload);
-        else    await api('POST', '/api/lower-thirds', payload);
+        if (id) {
+          // Edit — JSON update, no file change
+          await api('PUT', `/api/lower-thirds/${id}`, {
+            label, trigger_offset: trigger, duration: dur,
+            schedule_item_id: sid, enabled,
+          });
+        } else {
+          // Upload — multipart
+          const fileInput = document.getElementById('ltFile');
+          if (!fileInput.files.length) { toast('Please select a PNG file', 'error'); return; }
+          const fd = new FormData();
+          fd.append('file', fileInput.files[0]);
+          fd.append('label', label);
+          fd.append('trigger_offset', trigger);
+          fd.append('duration', dur);
+          if (sid) fd.append('schedule_item_id', sid);
+          const resp = await fetch('/api/lower-thirds', { method: 'POST', body: fd });
+          if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.detail || resp.statusText); }
+        }
         toast('Saved');
         _modal('ltModal').hide();
         this.load();
@@ -982,7 +1397,7 @@ const App = (() => {
     confirmDelete(id) {
       const lt = this._items.find(x => x.id === id);
       document.getElementById('deleteModalBody').textContent =
-        `Delete lower third "${(lt && lt.label) || id}"?`;
+        `Delete overlay "${(lt && lt.label) || id}"?`;
       document.getElementById('btnConfirmDelete').onclick = async () => {
         try {
           await api('DELETE', `/api/lower-thirds/${id}`);
@@ -1036,6 +1451,12 @@ const App = (() => {
     toggleKey() {
       const inp  = document.getElementById('streamKeyInput');
       const icon = document.getElementById('streamKeyEyeIcon');
+      inp.type   = inp.type === 'password' ? 'text' : 'password';
+      icon.className = inp.type === 'password' ? 'bi bi-eye' : 'bi bi-eye-slash';
+    },
+    toggleYtKey() {
+      const inp  = document.getElementById('ytApiKeyInput');
+      const icon = document.getElementById('ytKeyEyeIcon');
       inp.type   = inp.type === 'password' ? 'text' : 'password';
       icon.className = inp.type === 'password' ? 'bi bi-eye' : 'bi bi-eye-slash';
     },
@@ -1102,6 +1523,10 @@ const App = (() => {
     preview.start();
     // Pre-fetch videos for schedule modal
     try { _videos = await api('GET', '/api/videos'); } catch {}
+    // Library search filter
+    document.getElementById('librarySearch')?.addEventListener('input', e => {
+      library.filter(e.target.value);
+    });
     // Restore schedule view preference
     const savedView = localStorage.getItem('scheduleView') || 'table';
     if (savedView === 'timeline') {
@@ -1112,5 +1537,213 @@ const App = (() => {
     }
   });
 
-  return { stream, status, library, schedule, settings, log, preview, bumpers, lowerThirds };
+  // ── Auto Schedule Bumper ──────────────────────────────────────────────────
+  const autoBumper = {
+    async load() {
+      try {
+        // Load settings
+        const s = await api('GET', '/api/settings');
+        const enabled  = s.auto_bumper_enabled === 'true';
+        const duration = parseInt(s.auto_bumper_duration || '30');
+        const el = document.getElementById('autoBumperEnabled');
+        const du = document.getElementById('autoBumperDuration');
+        if (el) el.checked  = enabled;
+        if (du) du.value    = duration;
+        await this.refreshStatus();
+        await this.refreshUpcoming();
+      } catch(e) { console.error('autoBumper.load', e); }
+    },
+    async refreshStatus() {
+      try {
+        const st = await api('GET', '/api/bumper/status');
+        const el  = document.getElementById('autoBumperStatus');
+        if (!el) return;
+        const pw = st.playwright_available;
+        const fe = st.file_exists;
+        const lr = st.last_rendered
+          ? new Date(st.last_rendered).toLocaleString()
+          : 'Never';
+        if (!pw) {
+          el.className = 'p-3 rounded bg-warning bg-opacity-10 text-warning-emphasis small';
+          el.innerHTML = '<i class="bi bi-exclamation-triangle me-1"></i>' +
+            '<strong>Playwright not installed.</strong> ' +
+            'Run: <code>pip install playwright &amp;&amp; playwright install chromium</code>';
+        } else if (!fe) {
+          el.className = 'p-3 rounded bg-body-secondary text-secondary small';
+          el.innerHTML = '<i class="bi bi-hourglass me-1"></i>No video rendered yet. ' +
+            'Enable the auto bumper and click <strong>Regenerate Now</strong>.';
+        } else {
+          el.className = 'p-3 rounded bg-success bg-opacity-10 text-success-emphasis small';
+          el.innerHTML = '<i class="bi bi-check-circle me-1"></i>' +
+            `<strong>Ready.</strong> Last rendered: ${escHtml(lr)}`;
+        }
+      } catch {}
+    },
+    async refreshUpcoming() {
+      const tbody = document.getElementById('upcomingBody');
+      if (!tbody) return;
+      try {
+        const items = await api('GET', '/api/schedule-upcoming');
+        if (!items || items.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="3" class="text-secondary small text-center py-2">No upcoming items.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = items.map(item => `
+          <tr>
+            <td class="font-monospace">${escHtml(item.time)}</td>
+            <td>${escHtml(item.title || '—')}</td>
+            <td class="text-secondary">${escHtml(item.speaker || '')}</td>
+          </tr>`).join('');
+      } catch {
+        tbody.innerHTML = '<tr><td colspan="3" class="text-secondary small text-center py-2">Error loading.</td></tr>';
+      }
+    },
+    async setEnabled(val) {
+      try {
+        await api('POST', '/api/settings', { auto_bumper_enabled: val ? 'true' : 'false' });
+        if (val) toast('Auto bumper enabled — regenerating…');
+        else toast('Auto bumper disabled');
+        await this.refreshStatus();
+      } catch(e) { toast(e.message, 'error'); }
+    },
+    async setDuration(val) {
+      const n = Math.max(5, parseInt(val) || 30);
+      document.getElementById('autoBumperDuration').value = n;
+      try {
+        await api('POST', '/api/settings', { auto_bumper_duration: String(n) });
+      } catch(e) { toast(e.message, 'error'); }
+    },
+    async regenerate() {
+      const btn = document.getElementById('btnRegen');
+      if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Rendering…'; }
+      try {
+        await api('POST', '/api/bumper/regenerate');
+        toast('Rendering started — this may take ~30s');
+        // Poll for completion
+        let attempts = 0;
+        const poll = setInterval(async () => {
+          attempts++;
+          await this.refreshStatus();
+          const st = await api('GET', '/api/bumper/status').catch(() => ({}));
+          if (st.file_exists || attempts > 24) {
+            clearInterval(poll);
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Regenerate Now'; }
+          }
+        }, 5000);
+      } catch(e) {
+        toast(e.message, 'error');
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Regenerate Now'; }
+      }
+    },
+  };
+
+  // ── YouTube Title Enrichment ───────────────────────────────────────────────
+  const enrich = {
+    _results: [],
+    async open() {
+      // Populate library scope dropdown
+      try {
+        const libs = await api('GET', '/api/libraries');
+        const sel = document.getElementById('enrichLibId');
+        sel.innerHTML = '<option value="">\u2014 All Videos \u2014</option>' +
+          libs.map(l => `<option value="${l.id}">${escHtml(l.name)}</option>`).join('');
+      } catch {}
+      document.getElementById('enrichResultsWrap').classList.add('d-none');
+      document.getElementById('enrichStatus').textContent = '';
+      document.getElementById('btnEnrichApply').textContent = 'Apply 0 Selected';
+      document.getElementById('btnEnrichApply').disabled = true;
+      _modal('enrichModal').show();
+    },
+    async search() {
+      const libId = document.getElementById('enrichLibId').value;
+      const btn = document.getElementById('btnEnrichSearch');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Searching\u2026';
+      document.getElementById('enrichResultsWrap').classList.add('d-none');
+      document.getElementById('enrichStatus').innerHTML =
+        '<span class="text-secondary"><i class="bi bi-hourglass-split me-1"></i>Querying YouTube\u2026 this may take a moment.</span>';
+      try {
+        const body = libId ? { library_id: parseInt(libId) } : {};
+        const results = await api('POST', '/api/videos/enrich-preview', body);
+        this._results = results;
+        this._render(results);
+      } catch (e) {
+        document.getElementById('enrichStatus').innerHTML =
+          `<span class="text-danger"><i class="bi bi-exclamation-triangle me-1"></i>${escHtml(e.message)}</span>`;
+      }
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-youtube me-1"></i>Search YouTube';
+    },
+    _render(results) {
+      const wrap  = document.getElementById('enrichResultsWrap');
+      const tbody = document.getElementById('enrichBody');
+      if (!results.length) {
+        document.getElementById('enrichStatus').innerHTML =
+          '<span class="text-secondary">No videos found for the selected scope.</span>';
+        wrap.classList.add('d-none');
+        return;
+      }
+      tbody.innerHTML = results.map((r, i) => {
+        const has = r.candidates && r.candidates.length > 0;
+        const opts = has
+          ? r.candidates.map((c, ci) =>
+              `<option value="${escHtml(c.title)}"${ci === 0 ? ' selected' : ''}>${escHtml(c.title)} \u2014 ${escHtml(c.channel)}</option>`
+            ).join('')
+          : '<option value="">No match found</option>';
+        const badge = has
+          ? '<span class="badge bg-success">Match</span>'
+          : '<span class="badge bg-secondary">No match</span>';
+        return `
+          <tr>
+            <td class="text-center">
+              <input type="checkbox" class="form-check-input enrich-chk" data-idx="${i}"
+                ${has ? 'checked' : 'disabled'}
+                onchange="App.enrich._updateApplyBtn()" />
+            </td>
+            <td class="small font-monospace text-truncate" style="max-width:170px"
+              title="${escHtml(r.filename)}">${escHtml(r.filename)}</td>
+            <td class="small text-truncate text-secondary" style="max-width:200px"
+              title="${escHtml(r.current_title)}">${escHtml(r.current_title)}</td>
+            <td>
+              <select class="form-select form-select-sm enrich-sel" data-idx="${i}"
+                ${!has ? 'disabled' : ''}>${opts}</select>
+            </td>
+            <td>${badge}</td>
+          </tr>`;
+      }).join('');
+      const matched = results.filter(r => r.candidates && r.candidates.length).length;
+      document.getElementById('enrichStatus').innerHTML =
+        `<span class="text-success small"><i class="bi bi-check2 me-1"></i>${results.length} searched, ${matched} matched.</span>`;
+      wrap.classList.remove('d-none');
+      this._updateApplyBtn();
+    },
+    _updateApplyBtn() {
+      const count = document.querySelectorAll('.enrich-chk:checked').length;
+      const btn = document.getElementById('btnEnrichApply');
+      btn.innerHTML = `<i class="bi bi-check-lg me-1"></i>Apply ${count} Selected`;
+      btn.disabled = count === 0;
+    },
+    toggleAll(checked) {
+      document.querySelectorAll('.enrich-chk:not(:disabled)').forEach(c => { c.checked = checked; });
+      this._updateApplyBtn();
+    },
+    async apply() {
+      const payload = [];
+      document.querySelectorAll('.enrich-chk:checked').forEach(chk => {
+        const idx = parseInt(chk.dataset.idx);
+        const r   = this._results[idx];
+        const sel = document.querySelector(`.enrich-sel[data-idx="${idx}"]`);
+        if (sel && sel.value) payload.push({ video_id: r.video_id, title: sel.value });
+      });
+      if (!payload.length) return;
+      try {
+        const res = await api('POST', '/api/videos/enrich-apply', payload);
+        toast(`Updated ${res.updated} video title(s)`);
+        _modal('enrichModal').hide();
+        library.load();
+      } catch (e) { toast(e.message, 'error'); }
+    },
+  };
+
+  return { stream, status, library, libraries, schedule, settings, log, preview, bumpers, lowerThirds, autoBumper, enrich };
 })();

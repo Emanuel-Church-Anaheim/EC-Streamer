@@ -2,8 +2,11 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -20,10 +23,12 @@ from app.database import (
     SessionLocal,
     Setting,
     VideoFile,
+    VideoLibrary,
     get_db,
     init_db,
 )
 from app.streamer import stream_manager
+from app import bumper_renderer
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def on_startup() -> None:
     os.makedirs("videos", exist_ok=True)
     os.makedirs("bumpers", exist_ok=True)
+    os.makedirs("overlays", exist_ok=True)
     init_db()
     db = SessionLocal()
     try:
@@ -46,6 +52,20 @@ async def on_startup() -> None:
     finally:
         db.close()
     stream_manager.configure(settings)
+    # Auto-scan libraries flagged for it
+    db_scan = SessionLocal()
+    try:
+        for lib in db_scan.query(VideoLibrary).filter(VideoLibrary.auto_scan == True).all():  # noqa: E712
+            if os.path.isdir(lib.folder_path):
+                added, _ = _scan_library(lib, db_scan)
+                if added:
+                    logger.info("Auto-scan: %d new video(s) from library '%s'", added, lib.name)
+    except Exception as exc:
+        logger.warning("Auto-scan error on startup: %s", exc)
+    finally:
+        db_scan.close()
+    # Kick off auto bumper render in the background (no-op if disabled)
+    bumper_renderer.trigger_regenerate(settings)
 
 
 @app.on_event("shutdown")
@@ -59,6 +79,12 @@ async def on_shutdown() -> None:
 @app.get("/")
 async def index():
     return FileResponse("templates/index.html")
+
+
+@app.get("/bumper-preview", include_in_schema=False)
+async def bumper_preview():
+    """Live preview of the auto schedule bumper (also used by the renderer)."""
+    return FileResponse("templates/bumper.html")
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -82,6 +108,47 @@ async def favicon():
     )
     return Response(content=ICO_1PX, media_type="image/x-icon",
                     headers={"Cache-Control": "max-age=86400"})
+
+
+# ── Auto bumper ──────────────────────────────────────────────────────────────
+
+@app.get("/api/schedule-upcoming")
+def schedule_upcoming(db: Session = Depends(get_db)):
+    """Return the next 4 upcoming schedule items for the bumper preview page."""
+    return bumper_renderer.get_upcoming_schedule(db, limit=4)
+
+
+@app.post("/api/bumper/regenerate")
+def regenerate_bumper(db: Session = Depends(get_db)):
+    """Manually trigger a re-render of the auto schedule bumper."""
+    if not bumper_renderer.is_playwright_available():
+        raise HTTPException(
+            503,
+            "playwright is not installed. Run: pip install playwright && playwright install chromium",
+        )
+    settings = {s.key: s.value for s in db.query(Setting).all()}
+    # Force-enable for this call even if setting is off
+    settings["auto_bumper_enabled"] = "true"
+    bumper_renderer.trigger_regenerate(settings)
+    return {"status": "rendering"}
+
+
+@app.get("/api/bumper/status")
+def bumper_status():
+    """Return last-modified time and existence of the auto bumper file."""
+    path = bumper_renderer.AUTO_BUMPER_PATH
+    exists = os.path.exists(path)
+    mtime  = None
+    if exists:
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(path)).isoformat()
+        except OSError:
+            pass
+    return {
+        "file_exists":        exists,
+        "last_rendered":      mtime,
+        "playwright_available": bumper_renderer.is_playwright_available(),
+    }
 
 
 # ── System check ──────────────────────────────────────────────────────────────
@@ -239,6 +306,8 @@ async def update_settings(request: Request, db: Session = Depends(get_db)):
             db.add(Setting(key=key, value=str(value)))
     db.commit()
     _reload_settings(db)
+    settings = {s.key: s.value for s in db.query(Setting).all()}
+    bumper_renderer.trigger_regenerate(settings)
     return {"status": "saved"}
 
 
@@ -333,6 +402,7 @@ def _video_dict(v: VideoFile) -> dict:
         "title": v.title or v.filename,
         "duration": v.duration,
         "size": v.size,
+        "library_id": v.library_id,
         "created_at": v.created_at.isoformat() if v.created_at else None,
     }
 
@@ -354,25 +424,288 @@ def _probe_duration(filepath: str, db: Session) -> Optional[float]:
     return None
 
 
+# ── Video Libraries ────────────────────────────────────────────────────────────
+
+_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".wmv", ".flv", ".webm",
+               ".m4v", ".mpg", ".mpeg", ".ts", ".mts", ".m2ts"}
+
+
+@app.get("/api/libraries")
+def list_libraries(db: Session = Depends(get_db)):
+    return [_lib_dict(lib) for lib in db.query(VideoLibrary).order_by(VideoLibrary.created_at).all()]
+
+
+@app.post("/api/libraries")
+async def add_library(request: Request, db: Session = Depends(get_db)):
+    data = await request.json()
+    folder = data.get("folder_path", "").strip()
+    if not folder:
+        raise HTTPException(400, "folder_path is required")
+    # Normalise to absolute path
+    folder = os.path.abspath(folder)
+    if not os.path.isdir(folder):
+        raise HTTPException(400, f"Directory not found: {folder}")
+    if db.query(VideoLibrary).filter(VideoLibrary.folder_path == folder).first():
+        raise HTTPException(409, "A library for that folder already exists")
+    lib = VideoLibrary(
+        name=data.get("name", "").strip() or os.path.basename(folder) or folder,
+        folder_path=folder,
+        auto_scan=data.get("auto_scan", True),
+    )
+    db.add(lib)
+    db.commit()
+    db.refresh(lib)
+    added, skipped = _scan_library(lib, db)
+    logger.info("Library %s added — %d new, %d skipped", folder, added, skipped)
+    return {**_lib_dict(lib), "added": added, "skipped": skipped}
+
+
+@app.put("/api/libraries/{lib_id}")
+async def update_library(lib_id: int, request: Request, db: Session = Depends(get_db)):
+    lib = db.query(VideoLibrary).filter(VideoLibrary.id == lib_id).first()
+    if not lib:
+        raise HTTPException(404, "Library not found")
+    data = await request.json()
+    if "name" in data:
+        lib.name = data["name"]
+    if "auto_scan" in data:
+        lib.auto_scan = data["auto_scan"]
+    db.commit()
+    return _lib_dict(lib)
+
+
+@app.delete("/api/libraries/{lib_id}")
+def delete_library(
+    lib_id: int,
+    remove_videos: bool = False,
+    db: Session = Depends(get_db),
+):
+    lib = db.query(VideoLibrary).filter(VideoLibrary.id == lib_id).first()
+    if not lib:
+        raise HTTPException(404, "Library not found")
+    # Disassociate (or optionally delete) videos linked to this library
+    videos = db.query(VideoFile).filter(VideoFile.library_id == lib_id).all()
+    for v in videos:
+        if remove_videos:
+            db.query(ScheduledItem).filter(ScheduledItem.video_id == v.id).delete()
+            db.delete(v)
+        else:
+            v.library_id = None   # keep the video, just detach it
+    db.delete(lib)
+    db.commit()
+    return {"status": "deleted", "videos_removed": len(videos) if remove_videos else 0}
+
+
+@app.post("/api/libraries/{lib_id}/scan")
+def scan_library(lib_id: int, db: Session = Depends(get_db)):
+    lib = db.query(VideoLibrary).filter(VideoLibrary.id == lib_id).first()
+    if not lib:
+        raise HTTPException(404, "Library not found")
+    if not os.path.isdir(lib.folder_path):
+        raise HTTPException(400, f"Folder no longer exists: {lib.folder_path}")
+    added, skipped = _scan_library(lib, db)
+    return {"status": "scanned", "added": added, "skipped": skipped}
+
+
+def _lib_dict(lib: VideoLibrary) -> dict:
+    return {
+        "id": lib.id,
+        "name": lib.name,
+        "folder_path": lib.folder_path,
+        "auto_scan": lib.auto_scan,
+        "created_at": lib.created_at.isoformat() if lib.created_at else None,
+    }
+
+
+def _scan_library(lib: VideoLibrary, db: Session) -> tuple[int, int]:
+    """Walk lib.folder_path, add any new video files to VideoFile table.
+    Returns (added_count, skipped_count)."""
+    settings_dict = {s.key: s.value for s in db.query(Setting).all()}
+    added = skipped = 0
+    try:
+        for entry in os.scandir(lib.folder_path):
+            if not entry.is_file():
+                continue
+            ext = os.path.splitext(entry.name)[1].lower()
+            if ext not in _VIDEO_EXTS:
+                continue
+            abs_path = os.path.abspath(entry.path)
+            # Skip if already known
+            if db.query(VideoFile).filter(VideoFile.filepath == abs_path).first():
+                skipped += 1
+                continue
+            duration = _probe_duration_direct(abs_path, settings_dict)
+            try:
+                size = entry.stat().st_size
+            except OSError:
+                size = None
+            title = os.path.splitext(entry.name)[0]
+            video = VideoFile(
+                filename=entry.name,
+                filepath=abs_path,
+                title=title,
+                duration=duration,
+                size=size,
+                library_id=lib.id,
+            )
+            db.add(video)
+            added += 1
+    except Exception as exc:
+        logger.warning("Library scan error for %s: %s", lib.folder_path, exc)
+    db.commit()
+    return added, skipped
+
+
+def _probe_duration_direct(filepath: str, settings: dict) -> Optional[float]:
+    """ffprobe without a DB session (uses settings dict directly)."""
+    ffprobe = settings.get("ffprobe_path", "ffprobe")
+    try:
+        r = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_format", filepath],
+            capture_output=True, text=True, timeout=30,
+            creationflags=_CREATION_FLAGS,
+        )
+        if r.returncode == 0:
+            data = json.loads(r.stdout)
+            return float(data.get("format", {}).get("duration", 0)) or None
+    except Exception as exc:
+        logger.warning("Could not probe duration for %s: %s", filepath, exc)
+    return None
+
+
+# ── YouTube title enrichment ──────────────────────────────────────────────────
+
+def _yt_search(query: str, api_key: str, max_results: int = 3) -> list:
+    """Search YouTube Data API v3, return up to max_results candidates."""
+    params = urllib.parse.urlencode({
+        "part": "snippet",
+        "q": query,
+        "type": "video",
+        "maxResults": max_results,
+        "key": api_key,
+    })
+    url = f"https://www.googleapis.com/youtube/v3/search?{params}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "EC-Streamer/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        return [
+            {
+                "youtube_id": item["id"].get("videoId", ""),
+                "title": item["snippet"]["title"],
+                "channel": item["snippet"]["channelTitle"],
+                "thumbnail": item["snippet"]["thumbnails"].get("default", {}).get("url", ""),
+            }
+            for item in data.get("items", [])
+            if item.get("id", {}).get("videoId")
+        ]
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        raise HTTPException(exc.code, f"YouTube API error: {body}")
+    except Exception as exc:
+        logger.warning("YouTube search failed for '%s': %s", query, exc)
+        return []
+
+
+def _filename_to_query(filename: str) -> str:
+    """Turn a cleaned filename stem into a YouTube search query.
+    e.g. 'Lazar_Gog-Omul_de_tip_Isus' -> 'Lazar Gog Omul de tip Isus'
+    """
+    stem = os.path.splitext(filename)[0]
+    return re.sub(r"[_\-]+", " ", stem).strip()
+
+
+@app.post("/api/videos/enrich-preview")
+async def enrich_preview(request: Request, db: Session = Depends(get_db)):
+    """Search YouTube for title candidates for library videos.
+    Body: { library_id?: int, video_ids?: [int] }
+    Returns a list of { video_id, filename, current_title, query, candidates[] }.
+    """
+    body = await request.json()
+    settings_dict = {s.key: s.value for s in db.query(Setting).all()}
+    api_key = settings_dict.get("youtube_api_key", "").strip()
+    if not api_key:
+        raise HTTPException(400, "YouTube API key not configured. Add it in Settings > Integrations.")
+
+    library_id = body.get("library_id")
+    video_ids = body.get("video_ids")
+
+    if library_id:
+        videos = db.query(VideoFile).filter(VideoFile.library_id == int(library_id)).all()
+    elif video_ids:
+        videos = db.query(VideoFile).filter(VideoFile.id.in_(video_ids)).all()
+    else:
+        videos = db.query(VideoFile).all()
+
+    results = []
+    for v in videos:
+        query = _filename_to_query(v.filename)
+        candidates = _yt_search(query, api_key, max_results=3)
+        results.append({
+            "video_id": v.id,
+            "filename": v.filename,
+            "current_title": v.title or v.filename,
+            "query": query,
+            "candidates": candidates,
+        })
+    return results
+
+
+@app.post("/api/videos/enrich-apply")
+async def enrich_apply(request: Request, db: Session = Depends(get_db)):
+    """Apply enriched titles.
+    Body: [{ video_id: int, title: str }, ...]
+    """
+    items = await request.json()
+    updated = 0
+    for item in items:
+        v = db.query(VideoFile).filter(VideoFile.id == int(item["video_id"])).first()
+        if v and item.get("title"):
+            v.title = item["title"].strip()
+            updated += 1
+    db.commit()
+    return {"updated": updated}
+
+
 # ── Schedule ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/schedule")
 def list_schedule(db: Session = Depends(get_db)):
     items = db.query(ScheduledItem).order_by(ScheduledItem.start_time).all()
-    return [
-        _schedule_dict(item, db.query(VideoFile).filter(VideoFile.id == item.video_id).first())
-        for item in items
-    ]
+    result = []
+    for item in items:
+        slot_type = getattr(item, "slot_type", None) or "video"
+        video  = db.query(VideoFile).filter(VideoFile.id == item.video_id).first() if item.video_id else None
+        bumper = db.query(BumperFile).filter(BumperFile.id == item.bumper_id).first() if getattr(item, "bumper_id", None) else None
+        result.append(_schedule_dict(item, video, bumper))
+    return result
 
 
 @app.post("/api/schedule")
 async def add_schedule(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
-    video_id = data.get("video_id")
-    if not db.query(VideoFile).filter(VideoFile.id == video_id).first():
-        raise HTTPException(404, "Video not found")
+    slot_type = data.get("slot_type", "video") or "video"
+    video_id  = data.get("video_id")
+    bumper_id = data.get("bumper_id")
+
+    if slot_type == "video":
+        if not db.query(VideoFile).filter(VideoFile.id == video_id).first():
+            raise HTTPException(404, "Video not found")
+    elif slot_type == "bumper":
+        if not bumper_id or not db.query(BumperFile).filter(BumperFile.id == bumper_id).first():
+            raise HTTPException(404, "Bumper not found")
+        video_id = None
+    elif slot_type == "auto_bumper":
+        video_id  = None
+        bumper_id = None
+    else:
+        raise HTTPException(400, f"Unknown slot_type: {slot_type}")
+
     item = ScheduledItem(
         video_id=video_id,
+        slot_type=slot_type,
+        bumper_id=bumper_id,
+        slot_duration=data.get("slot_duration"),
         title=data.get("title"),
         start_time=data["start_time"],
         recurrence=data.get("recurrence", "once"),
@@ -387,8 +720,10 @@ async def add_schedule(request: Request, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(item)
     stream_manager.trigger_switch()
-    video = db.query(VideoFile).filter(VideoFile.id == item.video_id).first()
-    return _schedule_dict(item, video)
+    _trigger_auto_bumper(db)
+    video  = db.query(VideoFile).filter(VideoFile.id == item.video_id).first() if item.video_id else None
+    bumper = db.query(BumperFile).filter(BumperFile.id == item.bumper_id).first() if item.bumper_id else None
+    return _schedule_dict(item, video, bumper)
 
 
 @app.put("/api/schedule/{item_id}")
@@ -398,16 +733,18 @@ async def update_schedule(item_id: int, request: Request, db: Session = Depends(
         raise HTTPException(404, "Schedule item not found")
     data = await request.json()
     for field in ["title", "start_time", "recurrence", "date", "days_of_week",
-                  "enabled", "priority", "video_id"]:
+                  "enabled", "priority", "video_id", "slot_type", "bumper_id", "slot_duration"]:
         if field in data:
-            setattr(item, field, data[field])
+            setattr(item, field, data[field] if data[field] != '' else None)
     for field in ["bumper_pre_id", "bumper_post_id"]:
         if field in data:
             setattr(item, field, data[field] or None)
     db.commit()
     stream_manager.trigger_switch()
-    video = db.query(VideoFile).filter(VideoFile.id == item.video_id).first()
-    return _schedule_dict(item, video)
+    _trigger_auto_bumper(db)
+    video  = db.query(VideoFile).filter(VideoFile.id == item.video_id).first() if item.video_id else None
+    bumper = db.query(BumperFile).filter(BumperFile.id == item.bumper_id).first() if item.bumper_id else None
+    return _schedule_dict(item, video, bumper)
 
 
 @app.delete("/api/schedule/{item_id}")
@@ -418,15 +755,35 @@ def delete_schedule(item_id: int, db: Session = Depends(get_db)):
     db.delete(item)
     db.commit()
     stream_manager.trigger_switch()
+    _trigger_auto_bumper(db)
     return {"status": "deleted"}
 
 
-def _schedule_dict(item: ScheduledItem, video: Optional[VideoFile]) -> dict:
+def _trigger_auto_bumper(db: Session) -> None:
+    """Re-render auto bumper if enabled, pulling current settings."""
+    settings = {s.key: s.value for s in db.query(Setting).all()}
+    bumper_renderer.trigger_regenerate(settings)
+
+
+def _schedule_dict(item: ScheduledItem, video: Optional[VideoFile] = None, bumper: Optional[BumperFile] = None) -> dict:
+    slot_type = getattr(item, "slot_type", None) or "video"
+    if slot_type == "video":
+        display_title = (video.title or video.filename) if video else "Unknown"
+        duration = video.duration if video else None
+    elif slot_type == "bumper":
+        display_title = (bumper.title or bumper.filename) if bumper else "Unknown Bumper"
+        duration = bumper.duration if bumper else None
+    else:  # auto_bumper
+        display_title = "Auto Schedule Bumper"
+        duration = getattr(item, "slot_duration", None)
     return {
         "id": item.id,
+        "slot_type": slot_type,
         "video_id": item.video_id,
-        "video_title": (video.title or video.filename) if video else "Unknown",
-        "video_duration": video.duration if video else None,
+        "bumper_id": getattr(item, "bumper_id", None),
+        "slot_duration": getattr(item, "slot_duration", None),
+        "video_title": display_title,
+        "video_duration": duration,
         "title": item.title,
         "start_time": item.start_time,
         "recurrence": item.recurrence,
@@ -528,7 +885,7 @@ def _bumper_dict(b: BumperFile) -> dict:
     }
 
 
-# ── Lower thirds ─────────────────────────────────────────────────────────────
+# ── Overlay graphics (PNG lower thirds) ──────────────────────────────────────
 
 @app.get("/api/lower-thirds")
 def list_lower_thirds(db: Session = Depends(get_db)):
@@ -539,26 +896,56 @@ def list_lower_thirds(db: Session = Depends(get_db)):
 
 
 @app.post("/api/lower-thirds")
-async def create_lower_third(request: Request, db: Session = Depends(get_db)):
-    data = await request.json()
+async def upload_lower_third(
+    file: UploadFile = File(...),
+    label: str = Form(""),
+    trigger_offset: int = Form(0),
+    duration: int = Form(0),
+    schedule_item_id: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+):
+    if not file.filename:
+        raise HTTPException(400, "No file provided")
+    safe_name = os.path.basename(file.filename)
+    if not safe_name or safe_name in (".", ".."):
+        raise HTTPException(400, "Invalid filename")
+    # Allow PNG, JPEG, GIF, WEBP overlays
+    ext = os.path.splitext(safe_name)[1].lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+        raise HTTPException(400, "Only PNG/JPEG/GIF/WEBP files are accepted")
+    dest = os.path.abspath(os.path.join("overlays", safe_name))
+    overlays_root = os.path.abspath("overlays")
+    if not dest.startswith(overlays_root + os.sep):
+        raise HTTPException(400, "Invalid filename")
+    base, fext = os.path.splitext(dest)
+    counter = 1
+    while os.path.exists(dest):
+        dest = f"{base}_{counter}{fext}"
+        counter += 1
+    safe_name = os.path.basename(dest)
+    with open(dest, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    size = os.path.getsize(dest)
     lt = LowerThird(
-        label=data.get("label", ""),
-        line1=data.get("line1", ""),
-        line2=data.get("line2", ""),
-        position=data.get("position", "bottom-left"),
-        font_size=int(data.get("font_size", 32)),
-        text_color=data.get("text_color", "ffffff"),
-        bg_color=data.get("bg_color", "000000"),
-        bg_opacity=float(data.get("bg_opacity", 0.6)),
-        trigger_offset=int(data.get("trigger_offset", 5)),
-        duration=int(data.get("duration", 10)),
-        schedule_item_id=data.get("schedule_item_id") or None,
-        enabled=data.get("enabled", True),
+        label=label or os.path.splitext(safe_name)[0],
+        filename=safe_name,
+        filepath=dest,
+        trigger_offset=trigger_offset,
+        duration=duration,
+        schedule_item_id=schedule_item_id or None,
     )
     db.add(lt)
     db.commit()
     db.refresh(lt)
     return _lt_dict(lt)
+
+
+@app.get("/api/lower-thirds/{lt_id}/image")
+def get_overlay_image(lt_id: int, db: Session = Depends(get_db)):
+    lt = db.query(LowerThird).filter(LowerThird.id == lt_id).first()
+    if not lt or not lt.filepath or not os.path.exists(lt.filepath):
+        raise HTTPException(404, "Image not found")
+    return FileResponse(lt.filepath)
 
 
 @app.put("/api/lower-thirds/{lt_id}")
@@ -567,11 +954,9 @@ async def update_lower_third(
 ):
     lt = db.query(LowerThird).filter(LowerThird.id == lt_id).first()
     if not lt:
-        raise HTTPException(404, "Lower third not found")
+        raise HTTPException(404, "Overlay not found")
     data = await request.json()
-    for field in ("label", "line1", "line2", "position", "font_size",
-                  "text_color", "bg_color", "bg_opacity",
-                  "trigger_offset", "duration", "enabled"):
+    for field in ("label", "trigger_offset", "duration", "enabled"):
         if field in data:
             setattr(lt, field, data[field])
     if "schedule_item_id" in data:
@@ -584,7 +969,12 @@ async def update_lower_third(
 def delete_lower_third(lt_id: int, db: Session = Depends(get_db)):
     lt = db.query(LowerThird).filter(LowerThird.id == lt_id).first()
     if not lt:
-        raise HTTPException(404, "Lower third not found")
+        raise HTTPException(404, "Overlay not found")
+    try:
+        if lt.filepath and os.path.exists(lt.filepath):
+            os.remove(lt.filepath)
+    except OSError as exc:
+        logger.warning("Could not remove overlay %s: %s", lt.filepath, exc)
     db.delete(lt)
     db.commit()
     return {"status": "deleted"}
@@ -594,13 +984,7 @@ def _lt_dict(lt: LowerThird) -> dict:
     return {
         "id": lt.id,
         "label": lt.label,
-        "line1": lt.line1,
-        "line2": lt.line2,
-        "position": lt.position,
-        "font_size": lt.font_size,
-        "text_color": lt.text_color,
-        "bg_color": lt.bg_color,
-        "bg_opacity": lt.bg_opacity,
+        "filename": lt.filename,
         "trigger_offset": lt.trigger_offset,
         "duration": lt.duration,
         "schedule_item_id": lt.schedule_item_id,

@@ -19,6 +19,16 @@ class Setting(Base):
     value = Column(Text, default="")
 
 
+class VideoLibrary(Base):
+    """An external folder whose contents are scanned into the video library."""
+    __tablename__ = "video_libraries"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False)        # friendly label
+    folder_path = Column(String, nullable=False) # absolute path on disk
+    auto_scan = Column(Boolean, default=True)    # re-scan on startup
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class VideoFile(Base):
     __tablename__ = "videos"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -27,13 +37,14 @@ class VideoFile(Base):
     title = Column(String)
     duration = Column(Float)          # seconds
     size = Column(Integer)            # bytes
+    library_id = Column(Integer, nullable=True)  # VideoLibrary.id or None (= uploaded)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class ScheduledItem(Base):
     __tablename__ = "schedule"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    video_id = Column(Integer, nullable=False)
+    video_id = Column(Integer, nullable=True)      # None for bumper/auto_bumper slots
     title = Column(String)
     start_time = Column(String, nullable=False)   # HH:MM  24-hour
     recurrence = Column(String, default="once")   # once | daily | weekly
@@ -43,6 +54,9 @@ class ScheduledItem(Base):
     priority = Column(Integer, default=0)
     bumper_pre_id = Column(Integer, nullable=True)    # BumperFile.id or None
     bumper_post_id = Column(Integer, nullable=True)   # BumperFile.id or None
+    slot_type = Column(String, default="video")        # video | bumper | auto_bumper
+    bumper_id = Column(Integer, nullable=True)         # BumperFile.id when slot_type='bumper'
+    slot_duration = Column(Float, nullable=True)       # seconds for auto_bumper slot
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -61,17 +75,12 @@ class BumperFile(Base):
 class LowerThird(Base):
     __tablename__ = "lower_thirds"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    label = Column(String)                         # internal name
-    line1 = Column(String, default="")             # main text
-    line2 = Column(String, default="")             # subtitle (optional)
-    position = Column(String, default="bottom-left")
-    font_size = Column(Integer, default=32)
-    text_color = Column(String, default="ffffff")
-    bg_color = Column(String, default="000000")
-    bg_opacity = Column(Float, default=0.6)
-    trigger_offset = Column(Integer, default=5)    # seconds from video start
-    duration = Column(Integer, default=10)         # seconds to display
-    schedule_item_id = Column(Integer, nullable=True)  # None = global (all videos)
+    label = Column(String)                              # internal name
+    filename = Column(String, default="")               # PNG filename
+    filepath = Column(String, default="")               # absolute path to PNG
+    trigger_offset = Column(Integer, default=0)         # seconds from video start
+    duration = Column(Integer, default=0)               # seconds to display; 0 = entire video
+    schedule_item_id = Column(Integer, nullable=True)   # None = global (all videos)
     enabled = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -91,7 +100,9 @@ DEFAULT_SETTINGS: dict = {
     "filler_color": "000000",
     "bumper_enabled": "false",
     "bumper_between_items": "true",   # play bumper between scheduled videos
-    "font_path": "",                   # path to .ttf for lower thirds (blank = FFmpeg default)
+    "auto_bumper_enabled": "false",   # generate HTML schedule bumper
+    "auto_bumper_duration": "30",     # seconds per auto bumper video
+    "server_port": "8087",            # must match run.py port (used by renderer)
 }
 
 
@@ -99,8 +110,14 @@ def _migrate_db() -> None:
     """Add columns introduced after initial schema creation (SQLite-safe)."""
     with engine.connect() as conn:
         for table, col, definition in [
-            ("schedule", "bumper_pre_id",  "INTEGER"),
-            ("schedule", "bumper_post_id", "INTEGER"),
+            ("schedule",     "bumper_pre_id",  "INTEGER"),
+            ("schedule",     "bumper_post_id", "INTEGER"),
+            ("schedule",     "slot_type",      "TEXT DEFAULT 'video'"),
+            ("schedule",     "bumper_id",      "INTEGER"),
+            ("schedule",     "slot_duration",  "REAL"),
+            ("lower_thirds", "filename",       "TEXT DEFAULT ''"),
+            ("lower_thirds", "filepath",       "TEXT DEFAULT ''"),
+            ("videos",       "library_id",     "INTEGER"),
         ]:
             rows = conn.execute(
                 __import__("sqlalchemy").text(f"PRAGMA table_info({table})")
