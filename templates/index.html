@@ -229,6 +229,26 @@
           <button id="btnViewTimeline" class="btn btn-outline-secondary" onclick="App.schedule.setView('timeline')">
             <i class="bi bi-bar-chart-steps me-1"></i>Timeline</button>
         </div>
+        <!-- Zoom controls — only visible when timeline is active -->
+        <div id="tlZoomControls" class="d-none input-group input-group-sm" style="width:130px">
+          <button class="btn btn-outline-secondary" onclick="App.schedule.tlZoom(-1)" title="Zoom out">
+            <i class="bi bi-zoom-out"></i></button>
+          <span class="input-group-text px-2 text-center" id="tlZoomLabel" style="min-width:38px">1×</span>
+          <button class="btn btn-outline-secondary" onclick="App.schedule.tlZoom(1)" title="Zoom in">
+            <i class="bi bi-zoom-in"></i></button>
+        </div>
+        <!-- Snap controls — only visible when timeline is active -->
+        <div id="tlSnapControls" class="d-none input-group input-group-sm" style="width:145px">
+          <span class="input-group-text">Snap</span>
+          <select id="tlSnapSelect" class="form-select form-select-sm"
+            onchange="App.schedule.tlSnapChange(this.value)">
+            <option value="1">1 min</option>
+            <option value="5">5 min</option>
+            <option value="10">10 min</option>
+            <option value="15" selected>15 min</option>
+            <option value="30">30 min</option>
+          </select>
+        </div>
         <button class="btn btn-outline-success btn-sm" onclick="App.schedule.openAddBumper()">
           <i class="bi bi-collection-play-fill me-1"></i>Insert Bumper</button>
         <button class="btn btn-warning btn-sm" onclick="App.schedule.openAdd()">
@@ -508,6 +528,7 @@
                 <select class="form-select" name="filler_type" id="fillerTypeSelect"
                   onchange="App.settings.onFillerTypeChange()">
                   <option value="black" selected>Black Screen</option>
+                  <option value="auto_bumper">Auto Schedule Bumper (looped)</option>
                   <option value="color">Solid Color</option>
                   <option value="test">Test Pattern</option>
                 </select>
@@ -610,7 +631,7 @@
   <div class="modal-dialog modal-xl">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title"><i class="bi bi-youtube me-2 text-danger"></i>Enrich Titles from YouTube</h5>
+        <h5 class="modal-title"><i class="bi bi-journal-text me-2 text-info"></i>Enrich Titles from Sermon Catalogue</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
@@ -622,17 +643,16 @@
               <option value="">— All Videos —</option>
             </select>
           </div>
-          <button class="btn btn-sm btn-danger" id="btnEnrichSearch" onclick="App.enrich.search()">
-            <i class="bi bi-youtube me-1"></i>Search YouTube
+          <button class="btn btn-sm btn-info" id="btnEnrichSearch" onclick="App.enrich.search()">
+            <i class="bi bi-search me-1"></i>Match from Sermon List
           </button>
           <div id="enrichStatus" class="small text-secondary"></div>
         </div>
         <div class="alert alert-secondary py-2 small mb-3">
           <i class="bi bi-info-circle me-1"></i>
           EC-Streamer converts each filename to a search query (underscores &amp; hyphens become spaces) and
-          returns the top 3 YouTube results. Select the best match per row, then click <strong>Apply Selected</strong>.
-          The filename on disk is never changed — only the internal display title.
-          <strong>Free tier: ~100 searches/day.</strong> Configure your API key in Settings &rsaquo; Integrations.
+          matches against the local sermon catalogue (2 000+ entries). Select the best match per row, then click
+          <strong>Apply Selected</strong>. The filename on disk is never changed &mdash; only the internal display title.
         </div>
 
         <!-- Results table (hidden until search) -->

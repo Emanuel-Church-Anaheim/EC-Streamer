@@ -108,6 +108,7 @@ DEFAULT_SETTINGS: dict = {
 
 def _migrate_db() -> None:
     """Add columns introduced after initial schema creation (SQLite-safe)."""
+    import sqlalchemy as sa
     with engine.connect() as conn:
         for table, col, definition in [
             ("schedule",     "bumper_pre_id",  "INTEGER"),
@@ -120,16 +121,45 @@ def _migrate_db() -> None:
             ("videos",       "library_id",     "INTEGER"),
         ]:
             rows = conn.execute(
-                __import__("sqlalchemy").text(f"PRAGMA table_info({table})")
+                sa.text(f"PRAGMA table_info({table})")
             ).fetchall()
             existing = [r[1] for r in rows]
             if col not in existing:
                 conn.execute(
-                    __import__("sqlalchemy").text(
-                        f"ALTER TABLE {table} ADD COLUMN {col} {definition}"
-                    )
+                    sa.text(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
                 )
         conn.commit()
+
+        # Make schedule.video_id nullable (SQLite requires a full table rebuild)
+        rows = conn.execute(sa.text("PRAGMA table_info(schedule)")).fetchall()
+        # row format: (cid, name, type, notnull, dflt_value, pk)
+        vid_col = next((r for r in rows if r[1] == "video_id"), None)
+        if vid_col and vid_col[3] == 1:  # notnull == 1 means NOT NULL
+            col_names = [r[1] for r in rows]
+            cols_csv  = ", ".join(col_names)
+            # Rebuild without NOT NULL on video_id
+            col_defs = []
+            for r in rows:
+                cid, name, typ, notnull, dflt, pk = r
+                defn = f"{name} {typ}"
+                if pk:
+                    defn += " PRIMARY KEY"
+                if notnull and name != "video_id":
+                    defn += " NOT NULL"
+                if dflt is not None:
+                    defn += f" DEFAULT {dflt}"
+                col_defs.append(defn)
+            conn.execute(sa.text("PRAGMA foreign_keys = OFF"))
+            conn.execute(sa.text(
+                f"CREATE TABLE schedule_new ({', '.join(col_defs)})"
+            ))
+            conn.execute(sa.text(
+                f"INSERT INTO schedule_new ({cols_csv}) SELECT {cols_csv} FROM schedule"
+            ))
+            conn.execute(sa.text("DROP TABLE schedule"))
+            conn.execute(sa.text("ALTER TABLE schedule_new RENAME TO schedule"))
+            conn.execute(sa.text("PRAGMA foreign_keys = ON"))
+            conn.commit()
 
 
 def init_db() -> None:

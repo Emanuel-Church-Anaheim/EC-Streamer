@@ -200,6 +200,16 @@
   text-overflow: ellipsis;
   color: rgba(255, 255, 255, .95);
   pointer-events: none;
+  flex: 1;
+  min-width: 0;
+}
+.tl-item-endtime {
+  font-size: 10px;
+  color: rgba(255, 255, 255, .5);
+  white-space: nowrap;
+  pointer-events: none;
+  flex-shrink: 0;
+  margin-left: 6px;
 }
 .tl-now-line {
   position: absolute;

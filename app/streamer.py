@@ -211,6 +211,39 @@ class StreamManager:
         ftype  = self.settings.get("filler_type", "black")
         fcolor = self.settings.get("filler_color", "000000")
 
+        if ftype == "auto_bumper":
+            from app import bumper_renderer
+            auto_path = bumper_renderer.AUTO_BUMPER_PATH
+            if os.path.exists(auto_path):
+                w, h = res.split("x")
+                scale_filter = (
+                    f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                    f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                    f"setsar=1,fps=fps={fps}"
+                )
+                has_audio = self._probe_has_audio(auto_path)
+                if has_audio:
+                    return [
+                        ffmpeg, "-re",
+                        "-stream_loop", "-1", "-i", auto_path,
+                        "-vf", scale_filter,
+                        "-map", "0:v", "-map", "0:a",
+                        *self._common_encode_args(),
+                        self._rtmp_target(),
+                    ]
+                else:
+                    return [
+                        ffmpeg, "-re",
+                        "-stream_loop", "-1", "-i", auto_path,
+                        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                        "-vf", scale_filter,
+                        "-map", "0:v", "-map", "1:a",
+                        *self._common_encode_args(),
+                        self._rtmp_target(),
+                    ]
+            # Auto bumper file doesn't exist yet — fall back to black
+            ftype = "black"
+
         if ftype == "test":
             vsrc = f"testsrc=size={res}:rate={fps}"
         elif ftype == "color":

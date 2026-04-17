@@ -5,8 +5,7 @@ import platform
 import re
 import shutil
 import subprocess
-import urllib.parse
-import urllib.request
+import unicodedata
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -255,17 +254,24 @@ def get_preview(db: Session = Depends(get_db)):
         res    = settings.get("resolution", "1280x720")
         ftype  = settings.get("filler_type", "black")
         fcolor = settings.get("filler_color", "000000")
-        if ftype == "test":
-            vsrc = f"testsrc=size={res}:rate=1"
-        elif ftype == "color":
-            vsrc = f"color=c=#{fcolor}:size={res}:rate=1"
+        if ftype == "auto_bumper" and os.path.exists(bumper_renderer.AUTO_BUMPER_PATH):
+            cmd = [
+                ffmpeg, "-ss", "0", "-i", bumper_renderer.AUTO_BUMPER_PATH,
+                "-vframes", "1", "-vf", "scale=640:-2",
+                "-f", "image2", "-vcodec", "mjpeg", "-q:v", "3", "pipe:1",
+            ]
         else:
-            vsrc = f"color=c=black:size={res}:rate=1"
-        cmd = [
-            ffmpeg, "-f", "lavfi", "-i", vsrc,
-            "-vframes", "1", "-vf", "scale=640:-2",
-            "-f", "image2", "-vcodec", "mjpeg", "-q:v", "3", "pipe:1",
-        ]
+            if ftype == "test":
+                vsrc = f"testsrc=size={res}:rate=1"
+            elif ftype == "color":
+                vsrc = f"color=c=#{fcolor}:size={res}:rate=1"
+            else:
+                vsrc = f"color=c=black:size={res}:rate=1"
+            cmd = [
+                ffmpeg, "-f", "lavfi", "-i", vsrc,
+                "-vframes", "1", "-vf", "scale=640:-2",
+                "-f", "image2", "-vcodec", "mjpeg", "-q:v", "3", "pipe:1",
+            ]
 
     try:
         result = subprocess.run(
@@ -573,59 +579,82 @@ def _probe_duration_direct(filepath: str, settings: dict) -> Optional[float]:
     return None
 
 
-# ── YouTube title enrichment ──────────────────────────────────────────────────
+# ── Local sermon catalogue + title enrichment ────────────────────────────────
 
-def _yt_search(query: str, api_key: str, max_results: int = 3) -> list:
-    """Search YouTube Data API v3, return up to max_results candidates."""
-    params = urllib.parse.urlencode({
-        "part": "snippet",
-        "q": query,
-        "type": "video",
-        "maxResults": max_results,
-        "key": api_key,
-    })
-    url = f"https://www.googleapis.com/youtube/v3/search?{params}"
+_SERMON_CATALOGUE: list = []   # loaded lazily from yt_video_sermons.json
+
+def _load_sermon_catalogue() -> list:
+    global _SERMON_CATALOGUE
+    if _SERMON_CATALOGUE:
+        return _SERMON_CATALOGUE
+    catalogue_path = os.path.join(os.path.dirname(__file__), "..", "yt_video_sermons.json")
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "EC-Streamer/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        return [
-            {
-                "youtube_id": item["id"].get("videoId", ""),
-                "title": item["snippet"]["title"],
-                "channel": item["snippet"]["channelTitle"],
-                "thumbnail": item["snippet"]["thumbnails"].get("default", {}).get("url", ""),
-            }
-            for item in data.get("items", [])
-            if item.get("id", {}).get("videoId")
-        ]
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode(errors="replace")
-        raise HTTPException(exc.code, f"YouTube API error: {body}")
+        with open(catalogue_path, encoding="utf-8") as f:
+            _SERMON_CATALOGUE = json.load(f)
+        logger.info("Loaded %d entries from yt_video_sermons.json", len(_SERMON_CATALOGUE))
+    except FileNotFoundError:
+        logger.warning("yt_video_sermons.json not found — enrich will return no matches")
     except Exception as exc:
-        logger.warning("YouTube search failed for '%s': %s", query, exc)
-        return []
+        logger.warning("Failed to load sermon catalogue: %s", exc)
+    return _SERMON_CATALOGUE
+
+
+def _normalise(text: str) -> str:
+    """Lowercase, strip accents, collapse whitespace/punctuation to spaces."""
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+    text = re.sub(r"[^a-z0-9 ]+", " ", text.lower())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _token_overlap(a: str, b: str) -> float:
+    """Fraction of tokens in `a` that appear in `b`."""
+    ta = set(_normalise(a).split())
+    tb = set(_normalise(b).split())
+    if not ta:
+        return 0.0
+    return len(ta & tb) / len(ta)
 
 
 def _filename_to_query(filename: str) -> str:
-    """Turn a cleaned filename stem into a YouTube search query.
+    """Turn a cleaned filename stem into a human-readable query string.
     e.g. 'Lazar_Gog-Omul_de_tip_Isus' -> 'Lazar Gog Omul de tip Isus'
     """
     stem = os.path.splitext(filename)[0]
     return re.sub(r"[_\-]+", " ", stem).strip()
 
 
+def _search_catalogue(query: str, max_results: int = 3) -> list:
+    """Score every entry in the local catalogue against the query tokens.
+    Returns up to max_results sorted by descending score."""
+    catalogue = _load_sermon_catalogue()
+    if not catalogue:
+        return []
+    scored = []
+    for entry in catalogue:
+        combined = f"{entry.get('title', '')} {entry.get('speaker', '')}"
+        score = _token_overlap(query, combined)
+        if score > 0:
+            scored.append((score, entry))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [
+        {
+            "youtube_id": e["id"],
+            "title": f"{e['title']} - {e['speaker']}",
+            "channel": e.get("speaker", ""),
+            "score": round(s, 3),
+        }
+        for s, e in scored[:max_results]
+    ]
+
+
 @app.post("/api/videos/enrich-preview")
 async def enrich_preview(request: Request, db: Session = Depends(get_db)):
-    """Search YouTube for title candidates for library videos.
+    """Match library videos against the local sermon catalogue.
     Body: { library_id?: int, video_ids?: [int] }
     Returns a list of { video_id, filename, current_title, query, candidates[] }.
     """
     body = await request.json()
-    settings_dict = {s.key: s.value for s in db.query(Setting).all()}
-    api_key = settings_dict.get("youtube_api_key", "").strip()
-    if not api_key:
-        raise HTTPException(400, "YouTube API key not configured. Add it in Settings > Integrations.")
 
     library_id = body.get("library_id")
     video_ids = body.get("video_ids")
@@ -640,7 +669,7 @@ async def enrich_preview(request: Request, db: Session = Depends(get_db)):
     results = []
     for v in videos:
         query = _filename_to_query(v.filename)
-        candidates = _yt_search(query, api_key, max_results=3)
+        candidates = _search_catalogue(query, max_results=3)
         results.append({
             "video_id": v.id,
             "filename": v.filename,

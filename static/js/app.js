@@ -8,9 +8,13 @@ const App = (() => {
 
   // ── Shared state ──────────────────────────────────────────────────────────
   let _videos  = [];   // cached video list
+  let _bumpersList = []; // cached bumper list (for duration lookup)
   let _lastStatus = {};
   let _tlDrag  = null; // active timeline drag state
+  let _tlZoom  = 1;    // timeline zoom level (1 | 2 | 4 | 8)
+  let _tlSnap  = 15;   // drag/drop time-grid snap in minutes
   const DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const TL_VIDEO_COLOR = '#4e79a7'; // consistent colour for all video slots
 
   // Lazily get (or create) the floating drag-time tooltip element
   function _tlTooltip() {
@@ -741,8 +745,15 @@ const App = (() => {
       const bPre     = parseInt(document.getElementById('schedBumperPre').value)  || null;
       const bPost    = parseInt(document.getElementById('schedBumperPost').value) || null;
       const startTime = document.getElementById('schedTime').value;
+      const videoId  = parseInt(document.getElementById('schedVideo').value) || null;
+
+      if (!videoId) {
+        toast('Please select a video from the search dropdown first', 'warning');
+        document.getElementById('schedVideoSearch')?.focus();
+        return;
+      }
       const payload  = {
-        video_id:     parseInt(document.getElementById('schedVideo').value),
+        video_id:     videoId,
         start_time:   startTime,
         recurrence:   rec,
         date:         rec === 'once' ? document.getElementById('schedDate').value : null,
@@ -903,6 +914,10 @@ const App = (() => {
       document.getElementById('btnViewTimeline').classList.toggle('active', v === 'timeline');
       document.getElementById('scheduleTableWrap').classList.toggle('d-none', v !== 'table');
       document.getElementById('timelineView').classList.toggle('d-none', v !== 'timeline');
+      const zoomCtrl = document.getElementById('tlZoomControls');
+      if (zoomCtrl) zoomCtrl.classList.toggle('d-none', v !== 'timeline');
+      const snapCtrl = document.getElementById('tlSnapControls');
+      if (snapCtrl) snapCtrl.classList.toggle('d-none', v !== 'timeline');
       if (v !== 'table') document.getElementById('scheduleEmpty').classList.add('d-none');
       if (v === 'timeline') this.renderTimeline();
       else this.render();
@@ -922,16 +937,23 @@ const App = (() => {
       const todayDow   = (now.getDay() + 6) % 7;  // 0 = Monday
       const nowMins    = now.getHours() * 60 + now.getMinutes();
       const pct        = m => (m / 1440 * 100).toFixed(3) + '%';
+      const trackW     = Math.max(720, _tlZoom * 1440) + 'px';
+
+      // Ruler tick/label density scales with zoom
+      const tickMin    = _tlZoom <= 1 ? 60 : _tlZoom <= 2 ? 30 : 15;
+      const labelMin   = _tlZoom <= 1 ? 180 : _tlZoom <= 2 ? 60 : _tlZoom <= 4 ? 30 : 15;
 
       let rulerHtml = '';
-      for (let h = 0; h <= 24; h++) {
-        const lbl = (h % 3 === 0) ? `<span>${pad(h)}:00</span>` : '';
-        rulerHtml += `<div class="tl-ruler-mark" style="left:${pct(h * 60)}">${lbl}</div>`;
+      for (let m = 0; m <= 1440; m += tickMin) {
+        const h = Math.floor(m / 60), min = m % 60;
+        const timeStr = min === 0 ? `${pad(h)}:00` : `${pad(h)}:${pad(min)}`;
+        const lbl = (m % labelMin === 0) ? `<span>${timeStr}</span>` : '';
+        rulerHtml += `<div class="tl-ruler-mark" style="left:${pct(m)}">${lbl}</div>`;
       }
       let html = `
         <div class="tl-ruler-row">
           <div class="tl-side-label"></div>
-          <div class="tl-ruler">${rulerHtml}</div>
+          <div class="tl-ruler" style="min-width:${trackW}">${rulerHtml}</div>
         </div>`;
 
       for (let row = 0; row < 8; row++) {
@@ -972,18 +994,20 @@ const App = (() => {
           } else {
             col = TL_VIDEO_COLOR; tlClass = ''; editFn = `App.schedule.openEdit(${item.id})`;
           }
-          const title = escHtml(item.title || item.video_title || '?');
+          const endMin    = startMin + width;
+          const endFmt    = fmtLocalTime(pad(Math.floor(endMin / 60) % 24) + ':' + pad(endMin % 60));
+          const title     = escHtml(item.title || item.video_title || '?');
           const hasBumper = item.bumper_pre_id ? ' tl-has-bumper' : '';
           itemsHtml += `
             <div class="tl-item${hasBumper}${tlClass}"
               draggable="true"
               style="left:${pct(startMin)};width:${pct(width)};background:${col}"
-              title="${title} @ ${fmtLocalTime(item.start_time)} (${fmtDuration(item.video_duration)})"
+              title="${title} @ ${fmtLocalTime(item.start_time)} \u2192 ${endFmt} (${fmtDuration(item.video_duration)})"
               ondragstart="App.schedule.tlDragStart(event,${item.id},${startMin},${rowDow})"
               ondragend="App.schedule.tlDragEnd(event)"
               onclick="App.schedule.tlItemClick(event,${item.id})"
               oncontextmenu="App.schedule.tlItemRightClick(event,${item.id})">
-              <span class="tl-item-label">${title}</span>
+              <span class="tl-item-label">${title}</span><span class="tl-item-endtime">${endFmt}</span>
             </div>`;
         }
 
@@ -993,7 +1017,7 @@ const App = (() => {
         html += `
           <div class="tl-row${isToday ? ' tl-today' : ''}">
             <div class="tl-side-label">${label}</div>
-            <div class="tl-track"
+            <div class="tl-track" style="min-width:${trackW}"
               data-dow="${isDailyRow ? 'all' : rowDow}"
               ondragover="App.schedule.tlDragOver(event)"
               ondragleave="App.schedule.tlDragLeave(event)"
@@ -1001,6 +1025,58 @@ const App = (() => {
           </div>`;
       }
       el.innerHTML = html;
+
+      // Scroll to centre on current time when zoomed in
+      if (_tlZoom > 1) {
+        const tw = parseInt(trackW);
+        const sideLabelW = 56; // matches .tl-side-label in CSS
+        const cw = el.clientWidth - sideLabelW;
+        el.scrollLeft = Math.max(0, (nowMins / 1440) * tw - cw / 2);
+      }
+    },
+
+    // ── Timeline zoom ────────────────────────────────────────────────────
+    tlZoom(dir) {
+      const levels = [1, 2, 4, 8];
+      const idx = levels.indexOf(_tlZoom);
+      _tlZoom = levels[Math.max(0, Math.min(levels.length - 1, idx + dir))];
+      const lbl = document.getElementById('tlZoomLabel');
+      if (lbl) lbl.textContent = _tlZoom + '\u00d7';
+      this.renderTimeline();
+    },
+
+    tlSnapChange(v) {
+      _tlSnap = parseFloat(v) || 15;
+    },
+
+    // ── Timeline element-snap helpers ───────────────────────────────────
+    _itemsInRow(dow) {
+      const isDailyRow = (dow === 'all');
+      const rowDowInt  = parseInt(dow);
+      return this._items.filter(item => {
+        if (!item.enabled) return false;
+        if (isDailyRow) return item.recurrence === 'daily';
+        if (item.recurrence === 'weekly')
+          return (item.days_of_week || '').split(',').map(Number).includes(rowDowInt);
+        if (item.recurrence === 'once' && item.date) {
+          const dt = new Date(item.date + 'T12:00:00');
+          return ((dt.getDay() + 6) % 7) === rowDowInt;
+        }
+        return false;
+      });
+    },
+    _elementSnapPoints(dow, excludeId) {
+      return this._itemsInRow(dow).flatMap(item => {
+        if (item.id === excludeId) return [];
+        const [hh, mm] = (item.start_time || '00:00').split(':').map(Number);
+        const s   = hh * 60 + mm;
+        const dur = Math.max(5, Math.ceil((item.video_duration || 300) / 60));
+        const lbl = (item.title || item.video_title || '?').substring(0, 20);
+        return [
+          { min: s,       label: 'Start: ' + lbl },
+          { min: s + dur, label: 'End: '   + lbl },
+        ];
+      });
     },
 
     // ── Timeline drag-and-drop ───────────────────────────────────────────
@@ -1030,11 +1106,14 @@ const App = (() => {
       const typeLabel = slotType === 'auto_bumper' ? 'Auto Bumper'
                       : slotType === 'bumper'      ? 'Bumper'
                       : 'Video';
+      const [ciHH, ciMM] = (item.start_time || '00:00').split(':').map(Number);
+      const ciEnd   = ciHH * 60 + ciMM + Math.max(5, Math.ceil((item.video_duration || 300) / 60));
+      const ciEndFmt = fmtLocalTime(pad(Math.floor(ciEnd / 60) % 24) + ':' + pad(ciEnd % 60));
       const pop = document.createElement('div');
       pop.className = 'tl-popover';
       pop.innerHTML = `
         <div class="fw-semibold mb-1">${escHtml(item.title || item.video_title || '?')}</div>
-        <div class="text-secondary small">${typeLabel} &mdash; ${fmtLocalTime(item.start_time)}</div>
+        <div class="text-secondary small">${typeLabel} &mdash; ${fmtLocalTime(item.start_time)} &rarr; ${ciEndFmt}</div>
         <div class="text-secondary small">${fmtDuration(item.video_duration)}</div>
         <div class="d-flex gap-2 mt-2">
           <button class="btn btn-sm btn-outline-primary" onclick="${editFn};document.querySelector('.tl-popover')?.remove()">
@@ -1094,9 +1173,21 @@ const App = (() => {
       // Compute snapped time and show tooltip next to cursor
       const track  = e.currentTarget;
       const rect   = track.getBoundingClientRect();
-      const relX   = Math.max(0, e.clientX - rect.left);
-      const snapMin = Math.min(1435, Math.round((relX / rect.width) * 1440 / 15) * 15);
-      const label   = pad(Math.floor(snapMin / 60)) + ':' + pad(snapMin % 60);
+      const relX        = Math.max(0, e.clientX - rect.left);
+      const rawFracMin  = (relX / rect.width) * 1440;
+      const threshMin   = 20 / (rect.width / 1440);  // 20px in minutes
+      const sPts        = this._elementSnapPoints(track.dataset.dow, _tlDrag?.id);
+      let   elSnap      = null;
+      for (const pt of sPts) {
+        const d = Math.abs(rawFracMin - pt.min);
+        if (d < threshMin && (elSnap === null || d < Math.abs(rawFracMin - elSnap.min))) elSnap = pt;
+      }
+      const snapMin = elSnap
+        ? Math.min(1439, Math.max(0, elSnap.min))
+        : Math.min(1440 - _tlSnap, Math.round(rawFracMin / _tlSnap) * _tlSnap);
+      const label = elSnap
+        ? pad(Math.floor(snapMin / 60)) + ':' + pad(snapMin % 60) + ' \u2192 ' + elSnap.label.substring(0, 18)
+        : pad(Math.floor(snapMin / 60)) + ':' + pad(snapMin % 60);
       // Vertical drop-position indicator via CSS custom property
       const snapPct = (snapMin / 1440 * 100).toFixed(3) + '%';
       track.style.setProperty('--tl-drop-x', snapPct);
@@ -1123,8 +1214,18 @@ const App = (() => {
       track.classList.remove('drag-over');
       if (!_tlDrag) return;
       const rect   = track.getBoundingClientRect();
-      const relX   = Math.max(0, e.clientX - rect.left);
-      const newMin = Math.min(1435, Math.round((relX / rect.width) * 1440 / 15) * 15);
+      const relX       = Math.max(0, e.clientX - rect.left);
+      const rawFracMin = (relX / rect.width) * 1440;
+      const threshMin  = 20 / (rect.width / 1440);
+      const sPts       = this._elementSnapPoints(track.dataset.dow, _tlDrag?.id);
+      let   elSnap     = null;
+      for (const pt of sPts) {
+        const d = Math.abs(rawFracMin - pt.min);
+        if (d < threshMin && (elSnap === null || d < Math.abs(rawFracMin - elSnap.min))) elSnap = pt;
+      }
+      const newMin  = elSnap
+        ? Math.min(1439, Math.max(0, elSnap.min))
+        : Math.min(1440 - _tlSnap, Math.round(rawFracMin / _tlSnap) * _tlSnap);
       const newTime = pad(Math.floor(newMin / 60)) + ':' + pad(newMin % 60);
       const targetDow = track.dataset.dow;
       const item = this._items.find(x => x.id === _tlDrag.id);
@@ -1164,9 +1265,9 @@ const App = (() => {
       if (!tbody) return;
       document.getElementById('bumpersEmpty').classList.toggle('d-none', this._items.length > 0);
       document.getElementById('bumpersTable').classList.toggle('d-none', this._items.length === 0);
-      tbody.innerHTML = this._items.map(b => `
+      tbody.innerHTML = this._items.map((b, i) => `
         <tr>
-          <td class="text-secondary">${b.id}</td>
+          <td class="text-secondary">${i + 1}</td>
           <td class="fw-semibold">${escHtml(b.title)}</td>
           <td>${fmtDuration(b.duration)}</td>
           <td>${fmtSize(b.size)}</td>
@@ -1534,6 +1635,8 @@ const App = (() => {
       document.getElementById('btnViewTimeline')?.classList.add('active');
       document.getElementById('scheduleTableWrap')?.classList.add('d-none');
       document.getElementById('timelineView')?.classList.remove('d-none');
+      document.getElementById('tlZoomControls')?.classList.remove('d-none');
+      document.getElementById('tlSnapControls')?.classList.remove('d-none');
     }
   });
 
@@ -1672,7 +1775,7 @@ const App = (() => {
           `<span class="text-danger"><i class="bi bi-exclamation-triangle me-1"></i>${escHtml(e.message)}</span>`;
       }
       btn.disabled = false;
-      btn.innerHTML = '<i class="bi bi-youtube me-1"></i>Search YouTube';
+      btn.innerHTML = '<i class="bi bi-search me-1"></i>Match from Sermon List';
     },
     _render(results) {
       const wrap  = document.getElementById('enrichResultsWrap');
