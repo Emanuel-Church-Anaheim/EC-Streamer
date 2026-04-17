@@ -83,6 +83,7 @@ const App = (() => {
         if (tab === 'settings') settings.load();
         if (tab === 'bumpers')  { autoBumper.load(); bumpers.load(); }
         if (tab === 'overlays') lowerThirds.load();
+        if (tab === 'restream') restream.load();
       });
     });
   }
@@ -1848,5 +1849,257 @@ const App = (() => {
     },
   };
 
-  return { stream, status, library, libraries, schedule, settings, log, preview, bumpers, lowerThirds, autoBumper, enrich };
+  // ── Re-stream ─────────────────────────────────────────────────────────────
+  const restream = {
+    _videos:    [],
+    _selected:  null,   // { filepath, title, duration, size }
+    _pollTimer: null,
+    _uploadFile: null,  // File object pending upload
+
+    // ── Tab lifecycle ──────────────────────────────────────────────────────
+    async load() {
+      try {
+        // Prefill settings from stored main settings
+        const s = await api('GET', '/api/settings');
+        document.getElementById('rsRtmpUrl').value     = s.rtmp_url      || '';
+        document.getElementById('rsStreamKey').value   = s.stream_key    || '';
+        document.getElementById('rsResolution').value  = s.resolution    || '1280x720';
+        document.getElementById('rsFps').value         = s.fps           || '30';
+        document.getElementById('rsVideoBitrate').value= s.video_bitrate || '4500k';
+        document.getElementById('rsAudioBitrate').value= s.audio_bitrate || '160k';
+        document.getElementById('rsEncoder').value     = s.encoder       || 'libx264';
+      } catch {}
+      await this._loadVideos();
+      // Sync status in case a re-stream is already running
+      await this._syncStatus();
+    },
+
+    async _loadVideos() {
+      try {
+        this._videos = await api('GET', '/api/videos');
+      } catch { this._videos = []; }
+      this.filterLib();
+    },
+
+    filterLib() {
+      const q     = (document.getElementById('rsLibSearch')?.value || '').toLowerCase();
+      const items = this._videos.filter(v =>
+        !q || (v.title || v.filename || '').toLowerCase().includes(q)
+      );
+      const el = document.getElementById('rsLibList');
+      if (!el) return;
+      if (!items.length) {
+        el.innerHTML = '<div class="text-secondary small p-2">No videos found.</div>';
+        return;
+      }
+      el.innerHTML = items.map(v => {
+        const title   = escHtml(v.title || v.filename || '?');
+        const dur     = fmtDuration(v.duration);
+        const sz      = fmtSize(v.size);
+        const active  = this._selected?.filepath === v.filepath ? ' active' : '';
+        return `<button class="list-group-item list-group-item-action list-group-item-dark py-2${active}"
+          onclick="App.restream.selectVideo(${v.id})">
+          <div class="fw-semibold text-truncate">${title}</div>
+          <div class="text-secondary small">${dur} &bull; ${sz}</div>
+        </button>`;
+      }).join('');
+    },
+
+    selectVideo(id) {
+      const v = this._videos.find(x => x.id === id);
+      if (!v) return;
+      this._selected = { filepath: v.filepath, title: v.title || v.filename, duration: v.duration, size: v.size };
+      this._renderSelected();
+      this.filterLib(); // re-render to highlight active
+    },
+
+    clearSelection() {
+      this._selected = null;
+      this._renderSelected();
+      this.filterLib();
+    },
+
+    _renderSelected() {
+      const wrap  = document.getElementById('rsSelectedWrap');
+      const title = document.getElementById('rsSelectedTitle');
+      const meta  = document.getElementById('rsSelectedMeta');
+      if (!this._selected) {
+        wrap?.classList.add('d-none');
+        return;
+      }
+      title.textContent = this._selected.title;
+      meta.textContent  = [fmtDuration(this._selected.duration), fmtSize(this._selected.size)].filter(Boolean).join(' \u2022 ');
+      wrap?.classList.remove('d-none');
+    },
+
+    showSourceTab(which) {
+      const libPane    = document.getElementById('rsSourceLib');
+      const uploadPane = document.getElementById('rsSourceUpload');
+      const libBtn     = document.getElementById('rsTabLibBtn');
+      const upBtn      = document.getElementById('rsTabUploadBtn');
+      if (which === 'lib') {
+        libPane?.classList.remove('d-none');
+        uploadPane?.classList.add('d-none');
+        libBtn?.classList.add('active');
+        upBtn?.classList.remove('active');
+      } else {
+        libPane?.classList.add('d-none');
+        uploadPane?.classList.remove('d-none');
+        libBtn?.classList.remove('active');
+        upBtn?.classList.add('active');
+      }
+    },
+
+    onUploadChange(e) {
+      const f = e.target.files[0];
+      this._uploadFile = f || null;
+      document.getElementById('rsUploadBtn').disabled = !f;
+    },
+
+    async uploadFile() {
+      const f = this._uploadFile;
+      if (!f) return;
+      const btn  = document.getElementById('rsUploadBtn');
+      const prog = document.getElementById('rsUploadProgress');
+      const bar  = document.getElementById('rsUploadBar');
+      const stat = document.getElementById('rsUploadStatus');
+      btn.disabled = true;
+      prog.classList.remove('d-none');
+      stat.textContent = 'Uploading…';
+      bar.style.width  = '0%';
+      const fd = new FormData();
+      fd.append('file', f);
+      fd.append('title', f.name.replace(/\.[^.]+$/, ''));
+      try {
+        const xhr = new XMLHttpRequest();
+        await new Promise((resolve, reject) => {
+          xhr.upload.onprogress = ev => {
+            if (ev.lengthComputable) bar.style.width = Math.round(ev.loaded / ev.total * 100) + '%';
+          };
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText));
+            else reject(new Error(`Upload failed: ${xhr.status}`));
+          };
+          xhr.onerror = () => reject(new Error('Network error'));
+          xhr.open('POST', '/api/videos/upload');
+          xhr.send(fd);
+        });
+        stat.textContent = 'Upload complete!';
+        bar.style.width  = '100%';
+        bar.classList.remove('progress-bar-animated');
+        await this._loadVideos();
+        // Auto-select the newly uploaded file
+        if (this._videos.length) {
+          this.selectVideo(this._videos[0].id);
+          this.showSourceTab('lib');
+        }
+        toast('Video uploaded');
+      } catch (err) {
+        toast(err.message, 'error');
+        stat.textContent = 'Upload failed';
+      } finally {
+        btn.disabled = false;
+        document.getElementById('rsUploadInput').value = '';
+        this._uploadFile = null;
+      }
+    },
+
+    // ── Stream controls ────────────────────────────────────────────────────
+    async start() {
+      if (!this._selected) { toast('Select a video first', 'warn'); return; }
+      const rtmpUrl = document.getElementById('rsRtmpUrl').value.trim();
+      const key     = document.getElementById('rsStreamKey').value.trim();
+      if (!rtmpUrl) { toast('RTMP URL is required', 'warn'); return; }
+      const body = {
+        filepath:      this._selected.filepath,
+        title:         this._selected.title,
+        rtmp_url:      rtmpUrl,
+        stream_key:    key,
+        resolution:    document.getElementById('rsResolution').value,
+        fps:           document.getElementById('rsFps').value,
+        video_bitrate: document.getElementById('rsVideoBitrate').value,
+        audio_bitrate: document.getElementById('rsAudioBitrate').value,
+        encoder:       document.getElementById('rsEncoder').value,
+      };
+      try {
+        const r = await api('POST', '/api/restream/start', body);
+        toast(r.status === 'started' ? 'Re-stream started' : r.status);
+        this._startPolling();
+      } catch (e) { toast(e.message, 'error'); }
+    },
+
+    async stop() {
+      try {
+        await api('POST', '/api/restream/stop');
+        toast('Re-stream stopped');
+        this._stopPolling();
+        this._renderStatus({ running: false });
+      } catch (e) { toast(e.message, 'error'); }
+    },
+
+    // ── Status polling ─────────────────────────────────────────────────────
+    _startPolling() {
+      this._stopPolling();
+      this._pollTimer = setInterval(() => this._syncStatus(), 2000);
+    },
+    _stopPolling() {
+      if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+    },
+    async _syncStatus() {
+      try {
+        const s = await api('GET', '/api/restream/status');
+        this._renderStatus(s);
+        if (!s.running && this._pollTimer) this._stopPolling();
+      } catch {}
+    },
+
+    _renderStatus(s) {
+      const badge     = document.getElementById('rsBadge');
+      const startBtn  = document.getElementById('rsStartBtn');
+      const stopBtn   = document.getElementById('rsStopBtn');
+      const nowWrap   = document.getElementById('rsNowPlaying');
+      const nowTitle  = document.getElementById('rsNowPlayingTitle');
+      const logEl     = document.getElementById('rsLogViewer');
+
+      const live = s.running && s.process_alive;
+      if (badge) {
+        badge.className  = live ? 'badge ms-auto bg-danger' : 'badge ms-auto bg-secondary';
+        badge.textContent = live ? 'LIVE' : (s.running ? 'STARTING' : 'IDLE');
+      }
+      if (startBtn) startBtn.classList.toggle('d-none', !!s.running);
+      if (stopBtn)  stopBtn.classList.toggle('d-none', !s.running);
+      if (nowWrap)  nowWrap.classList.toggle('d-none', !live);
+      if (nowTitle && s.video_title) nowTitle.textContent = s.video_title;
+
+      // Append new log lines
+      if (logEl && Array.isArray(s.logs)) {
+        const prev = parseInt(logEl.dataset.logLen || '0');
+        const newLines = s.logs.slice(prev);
+        newLines.forEach(line => {
+          const d = document.createElement('div');
+          d.className = 'log-line';
+          d.textContent = line;
+          logEl.appendChild(d);
+        });
+        logEl.dataset.logLen = s.logs.length;
+        if (newLines.length) logEl.scrollTop = logEl.scrollHeight;
+      }
+    },
+
+    clearLog() {
+      const el = document.getElementById('rsLogViewer');
+      if (el) { el.innerHTML = ''; el.dataset.logLen = '0'; }
+    },
+
+    toggleKey() {
+      const inp = document.getElementById('rsStreamKey');
+      const ico = document.getElementById('rsKeyEyeIcon');
+      if (!inp) return;
+      inp.type = inp.type === 'password' ? 'text' : 'password';
+      ico?.classList.toggle('bi-eye', inp.type === 'password');
+      ico?.classList.toggle('bi-eye-slash', inp.type !== 'password');
+    },
+  };
+
+  return { stream, status, library, libraries, schedule, settings, log, preview, bumpers, lowerThirds, autoBumper, enrich, restream };
 })();

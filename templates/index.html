@@ -46,6 +46,8 @@
       <i class="bi bi-layers me-1 text-info"></i>Overlays</a></li>
     <li class="nav-item"><a class="nav-link" data-tab="settings" href="#">
       <i class="bi bi-gear me-1 text-secondary"></i>Settings</a></li>
+    <li class="nav-item"><a class="nav-link" data-tab="restream" href="#">
+      <i class="bi bi-arrow-repeat me-1 text-danger"></i>Re-Stream</a></li>
   </ul>
 
   <!-- ═══════════════════════════════════════════════════════════════════════ -->
@@ -119,7 +121,7 @@
         <div class="card">
           <div class="card-header"><i class="bi bi-clock me-2"></i><strong>Next Scheduled</strong></div>
           <div class="card-body" id="nextScheduledCard">
-            <div class="text-secondary small">No upcoming schedule</div>
+            <div class="text-secondary small">No upcoming sermons</div>
           </div>
         </div>
       </div>
@@ -621,6 +623,191 @@
 
     </div>
   </div><!-- /settings -->
+
+  <!-- ═══════════════════════════════════════════════════════════════════════ -->
+  <!-- TAB: Re-Stream                                                         -->
+  <!-- ═══════════════════════════════════════════════════════════════════════ -->
+  <div id="tab-restream" class="tab-pane d-none">
+    <div class="row g-3">
+
+      <!-- Video Source -->
+      <div class="col-lg-8">
+        <div class="card h-100">
+          <div class="card-header d-flex align-items-center gap-2">
+            <i class="bi bi-film me-1 text-warning"></i>
+            <strong>Video Source</strong>
+            <ul class="nav nav-pills nav-sm ms-auto" id="rsSourceTabs">
+              <li class="nav-item">
+                <a class="nav-link active py-1 px-2" id="rsTabLibBtn" href="#"
+                  onclick="App.restream.showSourceTab('lib'); return false;">
+                  <i class="bi bi-collection-play me-1"></i>Library</a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link py-1 px-2" id="rsTabUploadBtn" href="#"
+                  onclick="App.restream.showSourceTab('upload'); return false;">
+                  <i class="bi bi-cloud-upload me-1"></i>Upload</a>
+              </li>
+            </ul>
+          </div>
+          <div class="card-body d-flex flex-column" style="min-height:340px">
+
+            <!-- Library pane -->
+            <div id="rsSourceLib">
+              <div class="input-group mb-2">
+                <span class="input-group-text"><i class="bi bi-search"></i></span>
+                <input type="text" class="form-control" id="rsLibSearch"
+                  placeholder="Search library…" oninput="App.restream.filterLib()">
+              </div>
+              <div id="rsLibList" class="list-group list-group-flush overflow-auto" style="max-height:260px">
+                <div class="text-secondary small p-2">Loading library…</div>
+              </div>
+            </div>
+
+            <!-- Upload pane -->
+            <div id="rsSourceUpload" class="d-none">
+              <div class="mb-3">
+                <label class="form-label">Select video file to upload &amp; stream</label>
+                <input type="file" class="form-control" id="rsUploadInput"
+                  accept="video/*" onchange="App.restream.onUploadChange(event)">
+              </div>
+              <div id="rsUploadProgress" class="d-none">
+                <div class="progress mb-2" style="height:6px">
+                  <div id="rsUploadBar" class="progress-bar bg-warning progress-bar-striped progress-bar-animated"
+                    style="width:0%"></div>
+                </div>
+                <div id="rsUploadStatus" class="text-secondary small">Uploading…</div>
+              </div>
+              <button class="btn btn-outline-warning" id="rsUploadBtn" onclick="App.restream.uploadFile()" disabled>
+                <i class="bi bi-cloud-upload me-1"></i>Upload</button>
+            </div>
+
+            <!-- Selected file display -->
+            <div id="rsSelectedWrap" class="mt-auto pt-3 border-top border-secondary d-none">
+              <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-file-earmark-play fs-4 text-success"></i>
+                <div class="flex-grow-1 min-w-0">
+                  <div id="rsSelectedTitle" class="fw-semibold text-truncate">—</div>
+                  <div id="rsSelectedMeta" class="text-secondary small">—</div>
+                </div>
+                <button class="btn btn-outline-secondary btn-sm" onclick="App.restream.clearSelection()">
+                  <i class="bi bi-x"></i></button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- Right column: settings + controls -->
+      <div class="col-lg-4">
+
+        <!-- RTMP Settings -->
+        <div class="card mb-3">
+          <div class="card-header"><i class="bi bi-broadcast me-2 text-danger"></i><strong>Re-Stream Settings</strong></div>
+          <div class="card-body row g-2">
+            <div class="col-12">
+              <label class="form-label mb-1">RTMP URL</label>
+              <input type="url" class="form-control form-control-sm font-monospace" id="rsRtmpUrl"
+                placeholder="rtmp://live.twitch.tv/live">
+            </div>
+            <div class="col-12">
+              <label class="form-label mb-1">Stream Key</label>
+              <div class="input-group input-group-sm">
+                <input type="password" class="form-control font-monospace" id="rsStreamKey"
+                  placeholder="your-stream-key" autocomplete="current-password">
+                <button type="button" class="btn btn-outline-secondary" onclick="App.restream.toggleKey()">
+                  <i class="bi bi-eye" id="rsKeyEyeIcon"></i></button>
+              </div>
+            </div>
+            <div class="col-6">
+              <label class="form-label mb-1">Resolution</label>
+              <select class="form-select form-select-sm" id="rsResolution">
+                <option value="1920x1080">1080p</option>
+                <option value="1280x720" selected>720p</option>
+                <option value="854x480">480p</option>
+                <option value="640x360">360p</option>
+              </select>
+            </div>
+            <div class="col-6">
+              <label class="form-label mb-1">FPS</label>
+              <input type="text" class="form-control form-control-sm" id="rsFps"
+                list="rsFpsList" value="30">
+              <datalist id="rsFpsList">
+                <option value="60"></option><option value="30"></option>
+                <option value="29.97"></option><option value="25"></option>
+              </datalist>
+            </div>
+            <div class="col-6">
+              <label class="form-label mb-1">Video Bitrate</label>
+              <select class="form-select form-select-sm" id="rsVideoBitrate">
+                <option value="8000k">8000 kbps</option>
+                <option value="6000k">6000 kbps</option>
+                <option value="4500k" selected>4500 kbps</option>
+                <option value="3000k">3000 kbps</option>
+                <option value="2500k">2500 kbps</option>
+                <option value="1500k">1500 kbps</option>
+              </select>
+            </div>
+            <div class="col-6">
+              <label class="form-label mb-1">Audio Bitrate</label>
+              <select class="form-select form-select-sm" id="rsAudioBitrate">
+                <option value="320k">320 kbps</option>
+                <option value="192k">192 kbps</option>
+                <option value="160k" selected>160 kbps</option>
+                <option value="128k">128 kbps</option>
+              </select>
+            </div>
+            <div class="col-12">
+              <label class="form-label mb-1">Encoder</label>
+              <select class="form-select form-select-sm" id="rsEncoder">
+                <option value="libx264" selected>libx264 (CPU)</option>
+                <option value="h264_nvenc">h264_nvenc (NVIDIA)</option>
+                <option value="h264_amf">h264_amf (AMD)</option>
+                <option value="h264_qsv">h264_qsv (Intel QSV)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="card">
+          <div class="card-header d-flex align-items-center">
+            <i class="bi bi-toggles me-2"></i><strong>Controls</strong>
+            <span id="rsBadge" class="badge ms-auto bg-secondary">IDLE</span>
+          </div>
+          <div class="card-body d-flex flex-column gap-2">
+            <div id="rsNowPlaying" class="text-secondary small d-none">
+              <i class="bi bi-play-circle me-1 text-success"></i>
+              <span id="rsNowPlayingTitle" class="text-truncate d-inline-block" style="max-width:200px"></span>
+            </div>
+            <button id="rsStartBtn" class="btn btn-danger btn-lg" onclick="App.restream.start()">
+              <i class="bi bi-broadcast me-1"></i>Start Re-Stream</button>
+            <button id="rsStopBtn" class="btn btn-outline-secondary d-none" onclick="App.restream.stop()">
+              <i class="bi bi-stop-fill me-1"></i>Stop Re-Stream</button>
+            <div class="form-text">
+              <i class="bi bi-info-circle me-1"></i>
+              Stream ends automatically when the video finishes.
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Log -->
+      <div class="col-12">
+        <div class="card">
+          <div class="card-header d-flex align-items-center">
+            <i class="bi bi-terminal me-2"></i><strong>Re-Stream Log</strong>
+            <button class="btn btn-outline-secondary btn-sm ms-auto" onclick="App.restream.clearLog()">Clear</button>
+          </div>
+          <div class="card-body p-0">
+            <div id="rsLogViewer" class="log-viewer"></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div><!-- /restream -->
 
 </div><!-- /container -->
 

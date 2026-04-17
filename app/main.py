@@ -27,6 +27,7 @@ from app.database import (
     init_db,
 )
 from app.streamer import stream_manager
+from app.restream import restream_manager
 from app import bumper_renderer
 
 logger = logging.getLogger(__name__)
@@ -211,6 +212,46 @@ def play_now(video_id: int, db: Session = Depends(get_db)):
 def clear_override():
     stream_manager.clear_override()
     return {"status": "override_cleared"}
+
+
+# ── Re-stream control ─────────────────────────────────────────────────────────
+
+@app.get("/api/restream/status")
+def get_restream_status():
+    return restream_manager.get_status()
+
+
+@app.post("/api/restream/start")
+async def start_restream(request: Request, db: Session = Depends(get_db)):
+    data = await request.json()
+    filepath = data.get("filepath", "")
+    title    = data.get("title", os.path.basename(filepath))
+    # Merge caller-supplied settings on top of stored settings so ffmpeg/ffprobe
+    # paths are always available even if the user didn't send them.
+    stored = {s.key: s.value for s in db.query(Setting).all()}
+    settings = {
+        "ffmpeg_path":   stored.get("ffmpeg_path", "ffmpeg"),
+        "ffprobe_path":  stored.get("ffprobe_path", "ffprobe"),
+        "rtmp_url":      data.get("rtmp_url",      stored.get("rtmp_url",      "")),
+        "stream_key":    data.get("stream_key",    stored.get("stream_key",    "")),
+        "resolution":    data.get("resolution",    stored.get("resolution",    "1280x720")),
+        "fps":           data.get("fps",           stored.get("fps",           "30")),
+        "video_bitrate": data.get("video_bitrate", stored.get("video_bitrate", "4500k")),
+        "audio_bitrate": data.get("audio_bitrate", stored.get("audio_bitrate", "160k")),
+        "encoder":       data.get("encoder",       stored.get("encoder",       "libx264")),
+        "preset":        data.get("preset",        stored.get("preset",        "veryfast")),
+    }
+    if not filepath:
+        raise HTTPException(400, "filepath is required")
+    result = restream_manager.start(filepath, title, settings)
+    if result.get("status") == "error":
+        raise HTTPException(400, result.get("detail", "Cannot start re-stream"))
+    return result
+
+
+@app.post("/api/restream/stop")
+def stop_restream():
+    return restream_manager.stop()
 
 
 @app.get("/api/preview.jpg")

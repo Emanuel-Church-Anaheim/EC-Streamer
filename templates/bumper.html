@@ -372,7 +372,7 @@
     const grid = document.getElementById('grid');
     if (!items || items.length === 0) {
       grid.className = 'grid single';
-      grid.innerHTML = '<div class="placeholder">No upcoming schedule.</div>';
+      grid.innerHTML = '<div class="placeholder">No upcoming sermons</div>';
       return;
     }
     grid.className = 'grid ' + (items.length === 1 ? 'single' : 'pair');
