@@ -113,6 +113,14 @@ const App = (() => {
   }
   function pad(n) { return String(n).padStart(2, '0'); }
   function fmtTime(t) { return t || '—'; }
+  // Format raw seconds as H:MM:SS or M:SS
+  function _fmtSec(sec) {
+    sec = Math.floor(sec || 0);
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+  }
   function fmtLocalTime(hhmm) {
     if (!hhmm) return '—';
     const [h, m] = hhmm.split(':').map(Number);
@@ -2013,6 +2021,7 @@ const App = (() => {
       const body = {
         filepath:      this._selected.filepath,
         title:         this._selected.title,
+        duration:      this._selected.duration || null,
         rtmp_url:      rtmpUrl,
         stream_key:    key,
         resolution:    document.getElementById('rsResolution').value,
@@ -2060,6 +2069,10 @@ const App = (() => {
       const nowWrap   = document.getElementById('rsNowPlaying');
       const nowTitle  = document.getElementById('rsNowPlayingTitle');
       const logEl     = document.getElementById('rsLogViewer');
+      const progWrap  = document.getElementById('rsProgressWrap');
+      const progBar   = document.getElementById('rsProgressBar');
+      const progElap  = document.getElementById('rsProgressElapsed');
+      const progDur   = document.getElementById('rsProgressDuration');
 
       const live = s.running && s.process_alive;
       if (badge) {
@@ -2070,6 +2083,21 @@ const App = (() => {
       if (stopBtn)  stopBtn.classList.toggle('d-none', !s.running);
       if (nowWrap)  nowWrap.classList.toggle('d-none', !live);
       if (nowTitle && s.video_title) nowTitle.textContent = s.video_title;
+
+      // Progress bar
+      const hasDur = live && s.video_duration > 0;
+      if (progWrap) progWrap.classList.toggle('d-none', !hasDur);
+      if (hasDur && progBar) {
+        const elapsed = Math.max(0, s.elapsed_seconds || 0);
+        const dur     = s.video_duration;
+        const pct     = Math.min(100, (elapsed / dur) * 100);
+        progBar.style.width    = pct.toFixed(1) + '%';
+        progBar.setAttribute('aria-valuenow', pct.toFixed(0));
+        if (progElap) progElap.textContent = _fmtSec(elapsed);
+        if (progDur)  progDur.textContent  = _fmtSec(dur);
+      } else if (!live && progBar) {
+        progBar.style.width = '0%';
+      }
 
       // Append new log lines
       if (logEl && Array.isArray(s.logs)) {

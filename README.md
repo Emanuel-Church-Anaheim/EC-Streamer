@@ -4,17 +4,22 @@ A 24/7 RTMP video streamer with a full Web UI. Stream constantly to any RTMP end
 
 ## Features
 
-- **Constant RTMP stream** — never goes offline; falls back to a configurable filler screen (black, solid colour, or test pattern) when nothing is scheduled
-- **Video library** — upload local video files (MP4, MKV, AVI, MOV, TS, …) via drag-and-drop
-- **Scheduler** — schedule videos to play at specific times with one-time, daily, or weekly recurrence
+- **Constant RTMP stream** — never goes offline; falls back to a configurable filler screen (black, solid colour, test pattern, or looped auto-bumper) when nothing is scheduled
+- **Video library** — upload local video files (MP4, MKV, AVI, MOV, TS, …) or add external folder libraries with auto-scan
+- **Scheduler** — schedule videos to play at specific times with one-time, daily, or weekly recurrence; drag-and-drop timeline view with zoom (1×/2×/4×/8×), element snapping, and configurable time-snap increment
+- **Bumpers** — insert short bumper clips before videos (per-slot, round-robin, or auto-generated animated schedule bumper)
+- **Overlays / Lower Thirds** — composite PNG graphics on top of the stream with per-item timing
+- **Re-Stream** — one-shot stream of a single video to any RTMP target; streams end automatically when the video finishes; includes progress bar and per-session RTMP settings
 - **Play Now override** — force any video to play immediately from the library
-- **Web UI** — Dashboard, Library, Schedule, and Settings tabs; real-time status and log viewer
+- **Web UI** — Dashboard, Library, Schedule, Bumpers, Overlays, Re-Stream, and Settings tabs; real-time status, log viewer, and stream preview thumbnail
 - **Configurable quality** — resolution, FPS, video/audio bitrate, encoder (CPU / NVENC / AMF / QSV), preset
+- **Title enrichment** — match uploaded videos against a local sermon catalogue (`yt_video_sermons.json`) to auto-fill descriptive titles
 
 ## Requirements
 
 - Python 3.10+
 - [FFmpeg](https://ffmpeg.org/download.html) with `ffmpeg` and `ffprobe` accessible (add to PATH or set paths in Settings)
+- *(Optional)* [Playwright](https://playwright.dev/python/) + Chromium for the animated auto-schedule bumper renderer
 
 ## Quick Start
 
@@ -22,19 +27,23 @@ A 24/7 RTMP video streamer with a full Web UI. Stream constantly to any RTMP end
 # 1. Install Python dependencies
 pip install -r requirements.txt
 
-# 2. Start the server
+# 2. (Optional) Install Playwright for auto-bumper rendering
+pip install playwright && playwright install chromium
+
+# 3. Start the server
 python run.py
 
-# 3. Open the Web UI
-#    http://localhost:8080
+# 4. Open the Web UI
+#    http://localhost:8087
 ```
 
 ## Usage
 
 1. **Settings** → enter your RTMP URL and stream key, adjust quality, save
-2. **Library** → upload your video files
-3. **Schedule** → add schedule items (time + recurrence + video)
+2. **Library** → upload your video files or add a folder library
+3. **Schedule** → add schedule items (time + recurrence + video); use the timeline view to visualise and drag items
 4. **Dashboard** → click **Start Stream** — the stream begins broadcasting filler until a scheduled slot begins
+5. **Re-Stream** → for one-off streams (e.g. re-broadcasting a failed livestream): pick a video from the library or upload one, configure RTMP settings, and click **Start Re-Stream**; the stream stops automatically when the video ends
 
 ### RTMP URL format
 
@@ -49,21 +58,30 @@ python run.py
 ```
 EC-Streamer/
 ├── app/
-│   ├── main.py        # FastAPI routes
-│   ├── streamer.py    # FFmpeg process manager
-│   └── database.py    # SQLite models (SQLAlchemy)
+│   ├── main.py            # FastAPI routes
+│   ├── streamer.py        # 24/7 FFmpeg process manager
+│   ├── restream.py        # One-shot re-stream manager
+│   ├── bumper_renderer.py # Playwright-based auto-bumper renderer
+│   └── database.py        # SQLite models (SQLAlchemy)
 ├── templates/
-│   └── index.html     # Single-page Web UI
+│   ├── index.html         # Single-page Web UI
+│   └── bumper.html        # Auto-schedule bumper preview page
 ├── static/
-│   ├── js/app.js      # Frontend JavaScript
-│   └── css/style.css  # Custom styles
-├── videos/            # Uploaded video files (auto-created)
-├── run.py             # Entry point
+│   ├── js/app.js          # Frontend JavaScript (vanilla IIFE)
+│   ├── css/style.css      # Custom styles
+│   └── favicon.svg
+├── videos/                # Uploaded video files (auto-created)
+├── bumpers/               # Uploaded bumper clips (auto-created)
+├── overlays/              # Uploaded overlay PNGs (auto-created)
+├── yt_video_sermons.json  # Local sermon catalogue for title enrichment
+├── run.py                 # Entry point (uvicorn, port 8087)
 └── requirements.txt
 ```
 
 ## Notes
 
 - The database (`ec_streamer.db`) is created automatically on first run
+- The server runs on port **8087** by default (set in `run.py`)
 - When switching between videos there is a brief reconnect (~1 s); this is normal with direct RTMP output. For zero-gap switching, place an nginx-rtmp relay in front and stream to it
 - GPU encoders (`h264_nvenc`, `h264_amf`, `h264_qsv`) require the appropriate FFmpeg build and driver
+- The auto-schedule bumper (`bumpers/auto_bumper.mp4`) is generated by Playwright rendering `bumper.html`; if Playwright is not installed the bumper feature is disabled but everything else works normally

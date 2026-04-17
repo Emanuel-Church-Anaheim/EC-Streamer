@@ -243,7 +243,12 @@ async def start_restream(request: Request, db: Session = Depends(get_db)):
     }
     if not filepath:
         raise HTTPException(400, "filepath is required")
-    result = restream_manager.start(filepath, title, settings)
+    duration = data.get("duration")  # optional float — seconds
+    try:
+        duration = float(duration) if duration is not None else None
+    except (TypeError, ValueError):
+        duration = None
+    result = restream_manager.start(filepath, title, settings, duration=duration)
     if result.get("status") == "error":
         raise HTTPException(400, result.get("detail", "Cannot start re-stream"))
     return result

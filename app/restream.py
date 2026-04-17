@@ -50,11 +50,12 @@ class RestreamManager:
         self.started_at: Optional[str] = None
         self.filepath: Optional[str] = None
         self.video_title: Optional[str] = None
+        self.video_duration: Optional[float] = None  # seconds
         self.log_buffer: deque = deque(maxlen=300)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def start(self, filepath: str, title: str, settings: dict) -> dict:
+    def start(self, filepath: str, title: str, settings: dict, duration: Optional[float] = None) -> dict:
         with self._lock:
             if self.running:
                 return {"status": "already_running"}
@@ -63,6 +64,7 @@ class RestreamManager:
             self.running = True
             self.filepath = filepath
             self.video_title = title
+            self.video_duration = duration
             self.started_at = datetime.now().isoformat()
             self.log_buffer.clear()
         self._log(f"Re-stream starting: {title}")
@@ -83,6 +85,7 @@ class RestreamManager:
                 proc = self.process
                 self.running = False
                 self.started_at = None
+                self.video_duration = None
         if was_running:
             if proc and proc.poll() is None:
                 _kill_pid(proc.pid)
@@ -93,12 +96,20 @@ class RestreamManager:
     def get_status(self) -> dict:
         with self._lock:
             proc_alive = self.process is not None and self.process.poll() is None
+            elapsed: Optional[float] = None
+            if self.started_at:
+                try:
+                    elapsed = (datetime.now() - datetime.fromisoformat(self.started_at)).total_seconds()
+                except Exception:
+                    pass
             return {
                 "running": self.running,
                 "process_alive": proc_alive,
                 "started_at": self.started_at,
                 "filepath": self.filepath,
                 "video_title": self.video_title,
+                "video_duration": self.video_duration,
+                "elapsed_seconds": elapsed,
                 "logs": list(self.log_buffer),
             }
 
@@ -136,6 +147,7 @@ class RestreamManager:
                 self.running = False
                 self.process = None
                 self.started_at = None
+                self.video_duration = None
             self._log("Re-stream finished")
 
     def _build_cmd(self, filepath: str, s: dict) -> list:

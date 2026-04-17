@@ -34,6 +34,14 @@ videos/*
 !videos/.gitkeep
 bumpers/*
 !bumpers/.gitkeep
+overlays/*
+!overlays/.gitkeep
+
+# ── Auto-generated bumper video ───────────────────────────────────────────────
+bumpers/auto_bumper.mp4
+
+# ── Sermon catalogue (large local data file) ──────────────────────────────────
+yt_video_sermons.json
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
 *.log
