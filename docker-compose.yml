@@ -1,6 +1,5 @@
 services:
   ec-streamer:
-    build: .
     image: ghcr.io/emanuel-church-anaheim/ec-streamer:latest
     container_name: ec-streamer
     restart: unless-stopped

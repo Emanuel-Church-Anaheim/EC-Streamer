@@ -39,7 +39,7 @@ python run.py
 
 ## Docker / Portainer Deployment
 
-EC-Streamer can run as a self-contained Docker service with FFmpeg included and persistent volumes for the SQLite database and uploaded media.
+EC-Streamer can run as a self-contained Docker service with FFmpeg included and persistent volumes for the SQLite database and uploaded media. The default Compose file pulls the prebuilt private image from GitHub Container Registry instead of building on the Portainer host.
 
 ```bash
 docker compose up -d
@@ -62,14 +62,17 @@ The included `docker-compose.yml` stores runtime data in Docker volumes:
 
 ### Portainer
 
-For a private GitHub repo, deploy as a Git-backed Portainer stack:
+For a private GitHub repo and private GHCR image, deploy as a Git-backed Portainer stack:
 
-1. Go to **Stacks** -> **Add stack**.
-2. Choose **Repository**.
-3. Use this repo URL and branch `main`.
-4. Set the compose path to `docker-compose.yml`.
-5. Add GitHub credentials or a fine-scoped token that can read this private repo.
-6. Deploy the stack.
+1. In Portainer, add a registry for `ghcr.io` using a GitHub token with `read:packages` access.
+2. Go to **Stacks** -> **Add stack**.
+3. Choose **Repository**.
+4. Use this repo URL and branch `main`.
+5. Set the compose path to `docker-compose.yml`.
+6. Add GitHub credentials or a fine-scoped token that can read this private repo.
+7. Deploy the stack.
+
+This avoids building the image inside Portainer. GitHub Actions builds and publishes the image after changes are merged to `main`, and Portainer only pulls the finished image.
 
 The app also works behind Nginx Proxy Manager when proxied to `http://ec-streamer:8087` or `http://SERVER_IP:8087`. It remains fully functional when accessed directly by IP on the internal network.
 
