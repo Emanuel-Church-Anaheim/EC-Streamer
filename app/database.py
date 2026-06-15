@@ -1,9 +1,13 @@
+import os
+
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from datetime import datetime, timezone
 from typing import Optional
 
-DATABASE_URL = "sqlite:///./ec_streamer.db"
+DATA_DIR = os.getenv("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+DATABASE_URL = f"sqlite:///{DATA_DIR}/ec_streamer.db"
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
