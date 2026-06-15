@@ -58,6 +58,7 @@ Thumbs.db
 desktop.ini
 
 # ── IDEs & editors ────────────────────────────────────────────────────────────
+.opencode/
 .vscode/
 .idea/
 *.sublime-project
