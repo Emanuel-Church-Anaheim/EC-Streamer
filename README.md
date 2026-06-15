@@ -37,6 +37,44 @@ python run.py
 #    http://localhost:8087
 ```
 
+## Docker / Portainer Deployment
+
+EC-Streamer can run as a self-contained Docker service with FFmpeg included and persistent volumes for the SQLite database and uploaded media.
+
+```bash
+docker compose up -d
+```
+
+The container listens on port **8087**:
+
+```text
+http://SERVER_IP:8087
+```
+
+The included `docker-compose.yml` stores runtime data in Docker volumes:
+
+| Volume | Container path | Purpose |
+|---|---|---|
+| `ec_streamer_data` | `/data` | SQLite database |
+| `ec_streamer_videos` | `/app/videos` | Uploaded videos |
+| `ec_streamer_bumpers` | `/app/bumpers` | Uploaded bumper clips |
+| `ec_streamer_overlays` | `/app/overlays` | Uploaded overlay PNGs |
+
+### Portainer
+
+For a private GitHub repo, deploy as a Git-backed Portainer stack:
+
+1. Go to **Stacks** -> **Add stack**.
+2. Choose **Repository**.
+3. Use this repo URL and branch `main`.
+4. Set the compose path to `docker-compose.yml`.
+5. Add GitHub credentials or a fine-scoped token that can read this private repo.
+6. Deploy the stack.
+
+The app also works behind Nginx Proxy Manager when proxied to `http://ec-streamer:8087` or `http://SERVER_IP:8087`. It remains fully functional when accessed directly by IP on the internal network.
+
+Do not expose this app directly to the public internet without adding authentication or placing it behind a secured VPN/proxy, because it controls RTMP streaming settings.
+
 ## Usage
 
 1. **Settings** → enter your RTMP URL and stream key, adjust quality, save

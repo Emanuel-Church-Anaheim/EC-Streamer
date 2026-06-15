@@ -1,0 +1,21 @@
+services:
+  ec-streamer:
+    build: .
+    image: ghcr.io/emanuel-church-anaheim/ec-streamer:latest
+    container_name: ec-streamer
+    restart: unless-stopped
+    environment:
+      DATA_DIR: /data
+    ports:
+      - "8087:8087"
+    volumes:
+      - ec_streamer_data:/data
+      - ec_streamer_videos:/app/videos
+      - ec_streamer_bumpers:/app/bumpers
+      - ec_streamer_overlays:/app/overlays
+
+volumes:
+  ec_streamer_data:
+  ec_streamer_videos:
+  ec_streamer_bumpers:
+  ec_streamer_overlays:

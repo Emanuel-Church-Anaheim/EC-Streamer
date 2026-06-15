@@ -1,0 +1,14 @@
+.git
+.github
+__pycache__
+*.py[cod]
+*.sqlite
+*.sqlite3
+ec_streamer.db
+.env
+.venv
+venv
+videos
+bumpers
+overlays
+.DS_Store
