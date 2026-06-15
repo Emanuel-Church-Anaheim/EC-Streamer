@@ -13,6 +13,10 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Include Chromium and its OS dependencies for the auto schedule bumper renderer.
+RUN playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY . .
 
 RUN mkdir -p /data /app/videos /app/bumpers /app/overlays

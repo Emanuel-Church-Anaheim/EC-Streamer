@@ -39,7 +39,7 @@ python run.py
 
 ## Docker / Portainer Deployment
 
-EC-Streamer can run as a self-contained Docker service with FFmpeg included and persistent volumes for the SQLite database and uploaded media. The default Compose file pulls the prebuilt private image from GitHub Container Registry instead of building on the Portainer host.
+EC-Streamer can run as a self-contained Docker service with FFmpeg, Playwright, and Chromium included, plus persistent volumes for the SQLite database and uploaded media. The default Compose file pulls the prebuilt private image from GitHub Container Registry instead of building on the Portainer host.
 
 ```bash
 docker compose up -d

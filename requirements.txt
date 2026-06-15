@@ -3,3 +3,4 @@ uvicorn[standard]>=0.24.0
 sqlalchemy>=2.0.0
 python-multipart>=0.0.6
 aiofiles>=23.2.0
+playwright>=1.44.0
