@@ -59,6 +59,7 @@ desktop.ini
 
 # ── IDEs & editors ────────────────────────────────────────────────────────────
 .opencode/
+AGENTS.md
 .vscode/
 .idea/
 *.sublime-project
