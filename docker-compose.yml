@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     environment:
       DATA_DIR: /data
+      TZ: ${TZ:-America/Los_Angeles}
     ports:
       - "8087:8087"
     volumes:

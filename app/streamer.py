@@ -23,6 +23,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = platform.system() == "Windows"
+_DEFAULT_SCHEDULE_DURATION_SECONDS = 5 * 60
 
 # CREATE_NO_WINDOW prevents a console flash; CREATE_NEW_PROCESS_GROUP ensures
 # the child gets its own process group so we can kill the whole tree later.
@@ -468,7 +469,7 @@ class StreamManager:
                     video = db.query(VideoFile).filter(VideoFile.id == item.video_id).first() if item.video_id else None
                     if not video or not os.path.exists(video.filepath):
                         continue
-                    duration = video.duration or 0
+                    duration = video.duration or _DEFAULT_SCHEDULE_DURATION_SECONDS
                     hit_extra = {"video": video}
 
                 elif slot_type == "bumper":
@@ -476,7 +477,7 @@ class StreamManager:
                     bumper = db.query(BumperFile).filter(BumperFile.id == bid).first() if bid else None
                     if not bumper or not os.path.exists(bumper.filepath):
                         continue
-                    duration = bumper.duration or 0
+                    duration = bumper.duration or _DEFAULT_SCHEDULE_DURATION_SECONDS
                     hit_extra = {"bumper": bumper}
 
                 elif slot_type == "auto_bumper":
