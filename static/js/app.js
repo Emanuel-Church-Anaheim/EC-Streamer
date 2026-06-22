@@ -429,6 +429,9 @@ const App = (() => {
         const src = v.library_id
           ? `<span class="badge bg-warning text-dark" title="From folder library">Folder</span>`
           : `<span class="badge bg-secondary">Uploaded</span>`;
+        const enriched = v.title_enriched
+          ? '<span class="badge bg-success ms-1" title="Title has been enriched">Enriched</span>'
+          : '';
         return `
         <tr>
           <td class="text-secondary">${v.id}</td>
@@ -439,7 +442,7 @@ const App = (() => {
           <td class="text-secondary small font-monospace">${escHtml(v.filename)}</td>
           <td>${fmtDuration(v.duration)}</td>
           <td>${fmtSize(v.size)}</td>
-          <td>${src}</td>
+          <td>${src}${enriched}</td>
           <td class="text-end">
             <button class="btn btn-sm btn-success me-1" title="Play Now"
               onclick="App.library.playNow(${v.id})">
@@ -530,6 +533,37 @@ const App = (() => {
       document.getElementById('editVideoId').value    = id;
       document.getElementById('editVideoTitle').value = v.title;
       _modal('editVideoModal').show();
+    },
+    async enrichEdit() {
+      const id  = parseInt(document.getElementById('editVideoId').value);
+      const btn = document.getElementById('btnEditVideoEnrich');
+      if (!id) return;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Enriching...';
+      try {
+        const results = await api('POST', '/api/videos/enrich-preview', {
+          video_ids: [id],
+          force: true,
+        });
+        const match = results[0]?.candidates?.[0];
+        if (!match?.title) {
+          toast('No enrichment match found', 'warning');
+          return;
+        }
+        await api('PUT', `/api/videos/${id}`, {
+          title: match.title,
+          title_enriched: true,
+        });
+        document.getElementById('editVideoTitle').value = match.title;
+        toast('Title enriched');
+        _modal('editVideoModal').hide();
+        this.load();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-magic me-1"></i>Enrich';
+      }
     },
     async saveEdit() {
       const id    = parseInt(document.getElementById('editVideoId').value);
@@ -1791,7 +1825,7 @@ const App = (() => {
       const tbody = document.getElementById('enrichBody');
       if (!results.length) {
         document.getElementById('enrichStatus').innerHTML =
-          '<span class="text-secondary">No videos found for the selected scope.</span>';
+          '<span class="text-secondary">No unenriched videos found for the selected scope.</span>';
         wrap.classList.add('d-none');
         return;
       }

@@ -39,6 +39,7 @@ class VideoFile(Base):
     filename = Column(String, nullable=False)
     filepath = Column(String, nullable=False, unique=True)
     title = Column(String)
+    title_enriched = Column(Boolean, default=False)
     duration = Column(Float)          # seconds
     size = Column(Integer)            # bytes
     library_id = Column(Integer, nullable=True)  # VideoLibrary.id or None (= uploaded)
@@ -123,6 +124,7 @@ def _migrate_db() -> None:
             ("lower_thirds", "filename",       "TEXT DEFAULT ''"),
             ("lower_thirds", "filepath",       "TEXT DEFAULT ''"),
             ("videos",       "library_id",     "INTEGER"),
+            ("videos",       "title_enriched", "BOOLEAN DEFAULT 0"),
         ]:
             rows = conn.execute(
                 sa.text(f"PRAGMA table_info({table})")

@@ -442,6 +442,8 @@ async def update_video(video_id: int, request: Request, db: Session = Depends(ge
     data = await request.json()
     if "title" in data:
         video.title = data["title"]
+    if "title_enriched" in data:
+        video.title_enriched = bool(data["title_enriched"])
     db.commit()
     return _video_dict(video)
 
@@ -452,6 +454,7 @@ def _video_dict(v: VideoFile) -> dict:
         "filename": v.filename,
         "filepath": v.filepath,
         "title": v.title or v.filename,
+        "title_enriched": bool(v.title_enriched),
         "duration": v.duration,
         "size": v.size,
         "library_id": v.library_id,
@@ -704,6 +707,7 @@ async def enrich_preview(request: Request, db: Session = Depends(get_db)):
 
     library_id = body.get("library_id")
     video_ids = body.get("video_ids")
+    force = bool(body.get("force"))
 
     if library_id:
         videos = db.query(VideoFile).filter(VideoFile.library_id == int(library_id)).all()
@@ -714,12 +718,15 @@ async def enrich_preview(request: Request, db: Session = Depends(get_db)):
 
     results = []
     for v in videos:
+        if v.title_enriched and not force:
+            continue
         query = _filename_to_query(v.filename)
         candidates = _search_catalogue(query, max_results=3)
         results.append({
             "video_id": v.id,
             "filename": v.filename,
             "current_title": v.title or v.filename,
+            "title_enriched": bool(v.title_enriched),
             "query": query,
             "candidates": candidates,
         })
@@ -737,6 +744,7 @@ async def enrich_apply(request: Request, db: Session = Depends(get_db)):
         v = db.query(VideoFile).filter(VideoFile.id == int(item["video_id"])).first()
         if v and item.get("title"):
             v.title = item["title"].strip()
+            v.title_enriched = True
             updated += 1
     db.commit()
     return {"updated": updated}
